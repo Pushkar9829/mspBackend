@@ -4,6 +4,11 @@ import { Coupon } from "./coupon.model.js";
 import { AppError } from "../../utils/AppError.js";
 import { tenantFilter } from "../../middleware/tenantScope.js";
 import { emitDomain } from "../../utils/events.js";
+import { paginate, paginated } from "../../utils/pagination.js";
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function scoped(req) {
   if (!req.tenantId && !req.isPlatformAdmin) {
@@ -30,7 +35,18 @@ export async function updatePriceList(req, id, body) {
 }
 
 export async function listOffers(req) {
-  return Offer.find(scoped(req)).sort({ createdAt: -1 });
+  const { page, limit, skip } = paginate(req.query);
+  const filter = scoped(req);
+  if (req.query.status) filter.status = req.query.status;
+  if (req.query.q) {
+    const rx = new RegExp(escapeRegex(req.query.q.trim()), "i");
+    filter.name = rx;
+  }
+  const [data, total] = await Promise.all([
+    Offer.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Offer.countDocuments(filter),
+  ]);
+  return paginated(data, total, { page, limit });
 }
 
 export async function createOffer(req, body) {
@@ -49,7 +65,18 @@ export async function updateOffer(req, id, body) {
 }
 
 export async function listCoupons(req) {
-  return Coupon.find(scoped(req)).sort({ createdAt: -1 });
+  const { page, limit, skip } = paginate(req.query);
+  const filter = scoped(req);
+  if (req.query.status) filter.status = req.query.status;
+  if (req.query.q) {
+    const rx = new RegExp(escapeRegex(req.query.q.trim()), "i");
+    filter.$or = [{ code: rx }, { name: rx }];
+  }
+  const [data, total] = await Promise.all([
+    Coupon.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Coupon.countDocuments(filter),
+  ]);
+  return paginated(data, total, { page, limit });
 }
 
 export async function createCoupon(req, body) {
@@ -89,11 +116,11 @@ export async function approvePriceList(req, id) {
 
 export async function approveOffer(req, id) {
   const doc = await Offer.findOneAndUpdate(
-    { _id: id, ...scoped(req), status: "pending_approval" },
+    { _id: id, ...scoped(req), status: { $in: ["pending_approval", "draft"] } },
     { status: "active" },
     { new: true }
   );
-  if (!doc) throw new AppError(404, "Offer not pending approval", "NOT_FOUND");
+  if (!doc) throw new AppError(404, "Offer is not awaiting approval", "NOT_FOUND");
   emitDomain("PRICE_APPROVED", { tenantId: req.tenantId, resource: "offer", resourceId: doc._id, name: doc.name });
   return doc;
 }

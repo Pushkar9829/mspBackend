@@ -83,13 +83,19 @@ export async function issueTokens(user, role) {
   return { accessToken, refreshToken };
 }
 
+function refreshCookieOptions() {
+  return {
+    httpOnly: true,
+    sameSite: env.cookieSameSite,
+    secure: env.cookieSecure,
+    path: "/api/v1/auth",
+  };
+}
+
 function setRefreshCookie(res, token) {
   res.cookie("refreshToken", token, {
-    httpOnly: true,
-    sameSite: "lax",
-    secure: env.isProd,
+    ...refreshCookieOptions(),
     maxAge: 7 * 24 * 60 * 60 * 1000,
-    path: "/api/v1/auth",
   });
 }
 
@@ -199,7 +205,7 @@ export async function logout(req, res) {
   if (req.user) {
     await User.findByIdAndUpdate(req.user._id, { refreshTokenHash: "" });
   }
-  res.clearCookie("refreshToken", { path: "/api/v1/auth" });
+  res.clearCookie("refreshToken", refreshCookieOptions());
 }
 
 export async function forgotPassword(email) {
@@ -245,6 +251,21 @@ export async function changePassword(userId, currentPassword, newPassword) {
   user.passwordHash = await bcrypt.hash(newPassword, SALT);
   user.refreshTokenHash = "";
   await user.save();
+}
+
+export async function updateMe(userId, body) {
+  const user = await User.findById(userId);
+  if (!user) throw new AppError(404, "User not found", "NOT_FOUND");
+  if (body.name) user.name = body.name;
+  if (body.phone !== undefined) user.phone = body.phone;
+  if (body.profile) {
+    const prev = user.profile?.toObject?.() || user.profile || {};
+    user.profile = { ...prev, ...body.profile };
+  }
+  await user.save();
+  await user.populate("roleId");
+  await user.populate("tenantId", "name slug status branding businessProfile taxSettings orderRules notificationPreferences");
+  return toPublicUser(user, user.roleId);
 }
 
 export { SALT };

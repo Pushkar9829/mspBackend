@@ -29,6 +29,14 @@ router.post(
     res.json(await service.updateStatus(req, req.params.id, req.body.status, req.body.note));
   })
 );
+router.patch(
+  "/:id",
+  authorize("orders.update"),
+  audit("update", "order"),
+  asyncHandler(async (req, res) => {
+    res.json(await service.updateNotes(req, req.params.id, req.body));
+  })
+);
 router.post(
   "/:id/reorder",
   authorize("orders.create"),

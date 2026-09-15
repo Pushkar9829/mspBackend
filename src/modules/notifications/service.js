@@ -36,7 +36,11 @@ export async function persistAndPush({ userId, tenantId, event, title, body, dat
   return doc;
 }
 
+let listenersRegistered = false;
+
 export function registerNotificationListeners() {
+  if (listenersRegistered) return;
+  listenersRegistered = true;
   bus.on("ORDER_CREATED", (p) =>
     persistAndPush({
       userId: p.buyerId,

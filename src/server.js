@@ -1,27 +1,18 @@
 import http from "http";
 import { env } from "./config/env.js";
-import { connectDb } from "./config/db.js";
-import { createApp } from "./app.js";
+import { app, prepareRuntime } from "./bootstrap.js";
 import { attachSockets } from "./sockets/index.js";
 import { startJobs } from "./jobs/index.js";
-import { seedFoundation, seedDemoCatalog } from "./seeds/index.js";
-import { registerNotificationListeners } from "./modules/notifications/service.js";
-import { storage } from "./utils/storage.js";
 
 async function main() {
-  await connectDb();
-  await storage.ensure();
-  await seedFoundation();
-  await seedDemoCatalog();
-  registerNotificationListeners();
+  await prepareRuntime();
 
-  const app = createApp();
   const server = http.createServer(app);
   attachSockets(server);
   startJobs();
 
-  server.listen(env.port, () => {
-    console.log(`mspNode listening on http://localhost:${env.port}`);
+  server.listen(env.port, env.host, () => {
+    console.log(`mspNode listening on http://${env.host}:${env.port}`);
   });
 }
 

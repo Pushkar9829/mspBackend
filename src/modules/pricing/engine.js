@@ -18,6 +18,91 @@ function nowInWindow(startsAt, endsAt) {
   return true;
 }
 
+function categoryRef(product) {
+  const cat = product?.categoryId;
+  return cat?._id || cat || null;
+}
+
+export function offerApplies(offer, { productId, categoryId, buyerId }) {
+  const productMatch =
+    !offer.productIds?.length || offer.productIds.some((id) => String(id) === String(productId));
+  const categoryMatch =
+    !offer.categoryIds?.length ||
+    (categoryId && offer.categoryIds.some((id) => String(id) === String(categoryId)));
+  const customerMatch =
+    !offer.customerIds?.length || (buyerId && offer.customerIds.some((id) => String(id) === String(buyerId)));
+  return productMatch && categoryMatch && customerMatch;
+}
+
+export function offerDiscountAmount(offer, unitPrice) {
+  if (offer.type === "percent") return (Number(unitPrice) * offer.value) / 100;
+  return Math.min(offer.value, Number(unitPrice) || 0);
+}
+
+export function serializeOffer(offer) {
+  if (!offer) return null;
+  return {
+    id: String(offer._id),
+    name: offer.name,
+    type: offer.type,
+    value: offer.value,
+    badge: offer.type === "flash" ? "price-drop" : "offer",
+    endsAt: offer.endsAt,
+  };
+}
+
+export function matchingOffers(offers, product, buyerId) {
+  const tenantId = String(product.tenantId?._id || product.tenantId || "");
+  const ctx = {
+    productId: product._id,
+    categoryId: categoryRef(product),
+    buyerId,
+  };
+  return (offers || []).filter((offer) => {
+    if (tenantId && String(offer.tenantId) !== tenantId) return false;
+    if (offer.inventoryCap != null && offer.inventoryUsed >= offer.inventoryCap) return false;
+    return offerApplies(offer, ctx);
+  });
+}
+
+export function bestOfferForPrice(offers, unitPrice) {
+  let best = null;
+  let bestDiscount = 0;
+  for (const offer of offers || []) {
+    const discount = offerDiscountAmount(offer, unitPrice);
+    if (discount > bestDiscount) {
+      bestDiscount = discount;
+      best = offer;
+    }
+  }
+  return { offer: best, discount: bestDiscount };
+}
+
+export function applyOffersToVariants(variants, offers, product, buyerId) {
+  const matched = matchingOffers(offers, product, buyerId);
+  return (variants || []).map((v) => {
+    const raw = typeof v.toObject === "function" ? v.toObject() : { ...v };
+    const { offer, discount } = bestOfferForPrice(matched, raw.sellingPrice);
+    return {
+      ...raw,
+      catalogSellingPrice: raw.sellingPrice,
+      sellingPrice: round2(Math.max(0, Number(raw.sellingPrice) - discount)),
+      offer: serializeOffer(offer),
+    };
+  });
+}
+
+export async function loadActiveOffers(tenantIds) {
+  const ids = [...new Set((tenantIds || []).filter(Boolean).map((id) => String(id._id || id)))];
+  if (!ids.length) return [];
+  return Offer.find({
+    tenantId: { $in: ids },
+    status: "active",
+    startsAt: { $lte: new Date() },
+    endsAt: { $gte: new Date() },
+  }).lean();
+}
+
 export async function calculateLinePrice({ variant, product, qty, buyerId, tenantId }) {
   const listPrice = variant.listPrice;
   let unitPrice = variant.sellingPrice;
@@ -50,26 +135,9 @@ export async function calculateLinePrice({ variant, product, qty, buyerId, tenan
     endsAt: { $gte: new Date() },
   });
 
-  const productId = product?._id || variant.productId;
-  const categoryId = product?.categoryId;
-  let offerDiscount = 0;
-  for (const offer of offers) {
-    const productMatch = !offer.productIds?.length || offer.productIds.some((id) => String(id) === String(productId));
-    const categoryMatch =
-      !offer.categoryIds?.length ||
-      (categoryId && offer.categoryIds.some((id) => String(id) === String(categoryId)));
-    const customerMatch =
-      !offer.customerIds?.length || (buyerId && offer.customerIds.some((id) => String(id) === String(buyerId)));
-    if (!productMatch || !categoryMatch || !customerMatch) continue;
-    if (offer.inventoryCap != null && offer.inventoryUsed >= offer.inventoryCap) continue;
-
-    const discount =
-      offer.type === "percent" ? (unitPrice * offer.value) / 100 : Math.min(offer.value, unitPrice);
-    if (discount > offerDiscount) {
-      offerDiscount = discount;
-      breakdown.push({ step: "offer", amount: unitPrice - discount, offerId: offer._id });
-    }
-  }
+  const matched = matchingOffers(offers, product || { _id: variant.productId, tenantId }, buyerId);
+  const { offer, discount: offerDiscount } = bestOfferForPrice(matched, unitPrice);
+  if (offer) breakdown.push({ step: "offer", amount: unitPrice - offerDiscount, offerId: offer._id });
   unitPrice = Math.max(0, unitPrice - offerDiscount);
 
   const lineSubtotal = round2(unitPrice * qty);

@@ -1,6 +1,7 @@
 import { Warehouse } from "./warehouse.model.js";
 import { Inventory } from "./inventory.model.js";
 import { InventoryTransaction } from "./transaction.model.js";
+import { Product } from "../catalog/product.model.js";
 import { ProductVariant } from "../catalog/variant.model.js";
 import { AppError } from "../../utils/AppError.js";
 import { tenantFilter } from "../../middleware/tenantScope.js";
@@ -33,10 +34,25 @@ export async function listInventory(req) {
   if (req.query.lowStock === "true") {
     filter.$expr = { $lte: ["$available", "$lowStockThreshold"] };
   }
+  if (req.query.q) {
+    const rx = new RegExp(String(req.query.q).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    const products = await Product.find({ ...tenantFilter(req), name: rx }).select("_id").limit(50);
+    const variants = await ProductVariant.find({
+      ...tenantFilter(req),
+      $or: [{ sku: rx }, { productId: { $in: products.map((p) => p._id) } }],
+    })
+      .select("_id")
+      .limit(100);
+    filter.$or = [{ sku: rx }, { variantId: { $in: variants.map((v) => v._id) } }];
+  }
   const [data, total] = await Promise.all([
     Inventory.find(filter)
-      .populate("warehouseId", "name code")
-      .populate("variantId", "sku attributes sellingPrice listPrice productId")
+      .populate("warehouseId", "name code city")
+      .populate({
+        path: "variantId",
+        select: "sku attributes sellingPrice listPrice productId",
+        populate: { path: "productId", select: "name images sku status" },
+      })
       .skip(skip)
       .limit(limit)
       .sort({ sku: 1 }),

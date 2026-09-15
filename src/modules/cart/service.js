@@ -84,7 +84,7 @@ export async function quoteCart(cart, buyerId, address = null, { strictCoupon = 
   const lines = [];
   for (const item of cart.items) {
     const variant = await ProductVariant.findById(item.variantId);
-    const product = await Product.findById(item.productId);
+    const product = await Product.findById(item.productId).populate("brandId", "name");
     if (!variant || !product || product.status !== "published") {
       throw new AppError(400, "A cart item is no longer available", "UNAVAILABLE");
     }
@@ -108,6 +108,7 @@ export async function quoteCart(cart, buyerId, address = null, { strictCoupon = 
       sku: variant.sku,
       slug: String(product.sku || "").toLowerCase(),
       name: product.name,
+      brand: product.brandId?.name || "",
       image: product.images?.[0] || "",
       pack: variant.attributes?.packSize || variant.attributes?.size || "",
       attributes: variant.attributes,

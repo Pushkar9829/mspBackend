@@ -1,11 +1,22 @@
 import { AnalyticsEvent } from "./event.model.js";
 import { AnalyticsDaily } from "./daily.model.js";
+import { Tenant } from "../tenants/tenant.model.js";
 import { paginate, paginated } from "../../utils/pagination.js";
 import { AppError } from "../../utils/AppError.js";
+import { IMPORTANT_EVENTS, ANALYTICS_CATEGORIES } from "./events.catalog.js";
+
+function parseBound(value, endOfDay) {
+  if (!value) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return new Date(`${value}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}`);
+  }
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
 
 function range(query) {
-  const to = query.to ? new Date(query.to) : new Date();
-  const from = query.from ? new Date(query.from) : new Date(to.getTime() - 30 * 86400000);
+  const to = parseBound(query.to, true) || new Date();
+  const from = parseBound(query.from, false) || new Date(to.getTime() - 30 * 86400000);
   if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
     throw new AppError(400, "Invalid from/to date", "VALIDATION_ERROR");
   }
@@ -16,6 +27,15 @@ function range(query) {
 function tenantScope(req) {
   if (req.isPlatformAdmin && !req.tenantId) return {};
   return { tenantId: req.tenantId || req.user?.tenantId || null };
+}
+
+function queryFilters(req, { daily = false } = {}) {
+  const extra = {};
+  if (req.query.event) extra.event = req.query.event;
+  if (req.query.category) extra.category = req.query.category;
+  if (!daily && req.query.importance) extra.importance = req.query.importance;
+  if (!daily && req.query.userId) extra.userId = req.query.userId;
+  return extra;
 }
 
 function dayList(from, to) {
@@ -29,13 +49,20 @@ function dayList(from, to) {
   return days;
 }
 
+export function catalog() {
+  return {
+    events: Object.entries(IMPORTANT_EVENTS).map(([event, meta]) => ({ event, ...meta })),
+    categories: ANALYTICS_CATEGORIES,
+    importance: ["critical", "high", "normal", "low"],
+  };
+}
+
 export async function overview(req) {
   const { from, to } = range(req.query);
   const days = dayList(from, to);
-  const filter = { day: { $in: days }, ...tenantScope(req) };
-  if (req.query.event) filter.event = req.query.event;
+  const dailyFilter = { day: { $in: days }, ...tenantScope(req), ...queryFilters(req, { daily: true }) };
 
-  const rows = await AnalyticsDaily.find(filter).lean();
+  const rows = await AnalyticsDaily.find(dailyFilter).lean();
   let events = 0;
   let amount = 0;
   const byImportanceSeed = { critical: 0, high: 0, normal: 0, low: 0 };
@@ -49,13 +76,14 @@ export async function overview(req) {
     if (row.category) byCategory[row.category] = (byCategory[row.category] || 0) + row.count;
   }
 
+  const eventMatch = {
+    occurredAt: { $gte: from, $lte: to },
+    ...tenantScope(req),
+    ...queryFilters(req),
+  };
+
   const importance = await AnalyticsEvent.aggregate([
-    {
-      $match: {
-        occurredAt: { $gte: from, $lte: to },
-        ...tenantScope(req),
-      },
-    },
+    { $match: eventMatch },
     { $group: { _id: "$importance", count: { $sum: 1 } } },
   ]);
   for (const row of importance) {
@@ -63,10 +91,11 @@ export async function overview(req) {
   }
 
   const important = await AnalyticsEvent.find({
-    occurredAt: { $gte: from, $lte: to },
-    importance: { $in: ["critical", "high"] },
-    ...tenantScope(req),
+    ...eventMatch,
+    importance: req.query.importance || { $in: ["critical", "high"] },
   })
+    .populate("tenantId", "name slug")
+    .populate("userId", "name email")
     .sort({ occurredAt: -1 })
     .limit(20)
     .lean();
@@ -85,8 +114,7 @@ export async function overview(req) {
 export async function byDate(req) {
   const { from, to } = range(req.query);
   const days = dayList(from, to);
-  const filter = { day: { $in: days }, ...tenantScope(req) };
-  if (req.query.event) filter.event = req.query.event;
+  const filter = { day: { $in: days }, ...tenantScope(req), ...queryFilters(req, { daily: true }) };
   const rows = await AnalyticsDaily.find(filter).lean();
   const map = new Map(days.map((d) => [d, { day: d, count: 0, amount: 0 }]));
   for (const row of rows) {
@@ -101,8 +129,7 @@ export async function byDate(req) {
 export async function byEvent(req) {
   const { from, to } = range(req.query);
   const days = dayList(from, to);
-  const filter = { day: { $in: days }, ...tenantScope(req) };
-  if (req.query.category) filter.category = req.query.category;
+  const filter = { day: { $in: days }, ...tenantScope(req), ...queryFilters(req, { daily: true }) };
   const rows = await AnalyticsDaily.aggregate([
     { $match: filter },
     {
@@ -127,18 +154,62 @@ export async function byEvent(req) {
   };
 }
 
+export async function byTenant(req) {
+  const { from, to } = range(req.query);
+  const days = dayList(from, to);
+  const filter = { day: { $in: days }, ...tenantScope(req), ...queryFilters(req, { daily: true }) };
+  const rows = await AnalyticsDaily.aggregate([
+    { $match: filter },
+    {
+      $group: {
+        _id: "$tenantId",
+        count: { $sum: "$count" },
+        amount: { $sum: "$amount" },
+      },
+    },
+    { $sort: { count: -1 } },
+    { $limit: 25 },
+  ]);
+  const ids = rows.map((r) => r._id).filter(Boolean);
+  const tenants = ids.length
+    ? await Tenant.find({ _id: { $in: ids } }).select("name slug status").lean()
+    : [];
+  const map = new Map(tenants.map((t) => [String(t._id), t]));
+  return {
+    from,
+    to,
+    tenants: rows.map((r) => {
+      const t = r._id ? map.get(String(r._id)) : null;
+      return {
+        tenantId: r._id || null,
+        name: t?.name || (r._id ? "Unknown tenant" : "Platform"),
+        slug: t?.slug || "",
+        status: t?.status || "",
+        count: r.count,
+        amount: r.amount,
+      };
+    }),
+  };
+}
+
 export async function important(req) {
   const { from, to } = range(req.query);
   const { page, limit, skip } = paginate({ ...req.query, limit: req.query.limit || 50 });
   const filter = {
     occurredAt: { $gte: from, $lte: to },
-    importance: { $in: ["critical", "high"] },
+    importance: req.query.importance || { $in: ["critical", "high"] },
     ...tenantScope(req),
+    ...queryFilters(req, { daily: true }),
   };
-  if (req.query.event) filter.event = req.query.event;
   if (req.query.importance) filter.importance = req.query.importance;
   const [data, total] = await Promise.all([
-    AnalyticsEvent.find(filter).sort({ occurredAt: -1 }).skip(skip).limit(limit).lean(),
+    AnalyticsEvent.find(filter)
+      .populate("tenantId", "name slug")
+      .populate("userId", "name email")
+      .sort({ occurredAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
     AnalyticsEvent.countDocuments(filter),
   ]);
   return paginated(data, total, { page, limit });
@@ -150,13 +221,16 @@ export async function feed(req) {
   const filter = {
     occurredAt: { $gte: from, $lte: to },
     ...tenantScope(req),
+    ...queryFilters(req),
   };
-  if (req.query.event) filter.event = req.query.event;
-  if (req.query.category) filter.category = req.query.category;
-  if (req.query.importance) filter.importance = req.query.importance;
-  if (req.query.userId) filter.userId = req.query.userId;
   const [data, total] = await Promise.all([
-    AnalyticsEvent.find(filter).sort({ occurredAt: -1 }).skip(skip).limit(limit).lean(),
+    AnalyticsEvent.find(filter)
+      .populate("tenantId", "name slug")
+      .populate("userId", "name email")
+      .sort({ occurredAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
     AnalyticsEvent.countDocuments(filter),
   ]);
   return paginated(data, total, { page, limit });

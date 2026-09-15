@@ -140,6 +140,8 @@ export const PERMISSIONS = [
   "notifications.create",
   "notifications.send",
   "notifications.manage",
+  "settings.view",
+  "settings.edit",
   "audit.view",
 ];
 

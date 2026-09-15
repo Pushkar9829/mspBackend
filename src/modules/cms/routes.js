@@ -41,3 +41,6 @@ cmsAdminRouter.post("/:id/publish", authorize("cms.publish"), asyncHandler(async
 cmsAdminRouter.post("/:id/unpublish", authorize("cms.publish"), asyncHandler(async (req, res) => {
   res.json(await service.transition(req, req.params.id, "unpublished"));
 }));
+cmsAdminRouter.delete("/:id", authorize("cms.edit"), asyncHandler(async (req, res) => {
+  res.json(await service.deletePage(req, req.params.id));
+}));

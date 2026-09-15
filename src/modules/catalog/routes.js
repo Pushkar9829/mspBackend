@@ -58,6 +58,9 @@ categoryRouter.delete(
 );
 
 export const brandRouter = Router();
+brandRouter.get("/public", optionalAuth, asyncHandler(async (req, res) => {
+  res.json(await service.listPublicBrands());
+}));
 brandRouter.use(authenticate, resolveTenant);
 brandRouter.get("/", authorize("brands.view"), asyncHandler(async (req, res) => {
   res.json(await service.listBrands(req));
@@ -103,7 +106,7 @@ productRouter.get(
   "/lookup",
   optionalAuth,
   asyncHandler(async (req, res) => {
-    res.json(await service.lookupBySlug(req.query.slug, req.query.pack));
+    res.json(await service.lookupBySlug(req.query.slug, req.query.pack, req));
   })
 );
 productRouter.use(authenticate, resolveTenant);

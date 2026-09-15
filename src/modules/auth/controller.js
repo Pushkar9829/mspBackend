@@ -40,6 +40,10 @@ export const resetPassword = asyncHandler(async (req, res) => {
   res.json({ ok: true });
 });
 
+export const updateMe = asyncHandler(async (req, res) => {
+  res.json(await authService.updateMe(req.user._id, req.body));
+});
+
 export const changePassword = asyncHandler(async (req, res) => {
   await authService.changePassword(
     req.user._id,

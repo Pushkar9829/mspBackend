@@ -1,10 +1,21 @@
 import { Settings } from "./settings.model.js";
 import { AppError } from "../../utils/AppError.js";
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export async function listSettings(req) {
-  const filter = req.isPlatformAdmin && !req.tenantId
-    ? { $or: [{ scope: "platform" }, { scope: "tenant" }] }
-    : { scope: "tenant", tenantId: req.tenantId };
+  const filter = {};
+  if (req.isPlatformAdmin && !req.tenantId) {
+    filter.scope = req.query.scope === "tenant" ? "tenant" : "platform";
+    if (filter.scope === "platform") filter.tenantId = null;
+    else if (req.query.tenantId) filter.tenantId = req.query.tenantId;
+  } else {
+    filter.scope = "tenant";
+    filter.tenantId = req.tenantId;
+  }
+  if (req.query.q) filter.key = new RegExp(escapeRegex(req.query.q.trim()), "i");
   return Settings.find(filter).sort({ key: 1 });
 }
 

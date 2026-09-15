@@ -1,4 +1,5 @@
 import { Order } from "./order.model.js";
+import { User } from "../users/user.model.js";
 import { AppError } from "../../utils/AppError.js";
 import { paginate, paginated } from "../../utils/pagination.js";
 import { tenantFilter } from "../../middleware/tenantScope.js";
@@ -6,6 +7,10 @@ import { ORDER_STATUSES } from "../../config/constants.js";
 import { emitDomain } from "../../utils/events.js";
 import { confirmOrder, cancelOrder, refundOrder } from "../checkout/service.js";
 import { addItem, getOrCreateCart } from "../cart/service.js";
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function ownOrdersOnly(req) {
   const perms = req.permissions || [];
@@ -35,11 +40,34 @@ const ALLOWED = {
   return_requested: ["refunded"],
 };
 
+function parseDate(value, endOfDay = false) {
+  if (!value) return null;
+  if (endOfDay && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const d = new Date(`${value}T23:59:59.999`);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 export async function listOrders(req) {
   const { page, limit, skip } = paginate(req.query);
   const filter = ownOrdersOnly(req) ? { buyerId: req.user._id } : tenantFilter(req);
   if (req.query.status) filter.status = req.query.status;
-  if (req.query.q) filter.orderNumber = new RegExp(req.query.q, "i");
+  if (req.query.paymentStatus) filter.paymentStatus = req.query.paymentStatus;
+  const from = parseDate(req.query.from);
+  const to = parseDate(req.query.to, true);
+  if (from || to) {
+    filter.createdAt = {};
+    if (from) filter.createdAt.$gte = from;
+    if (to) filter.createdAt.$lte = to;
+  }
+  if (req.query.q) {
+    const rx = new RegExp(escapeRegex(req.query.q.trim()), "i");
+    const buyers = await User.find({ $or: [{ email: rx }, { name: rx }] }).select("_id").limit(25);
+    filter.$or = [{ orderNumber: rx }, { poNumber: rx }];
+    if (buyers.length) filter.$or.push({ buyerId: { $in: buyers.map((u) => u._id) } });
+  }
   const [data, total] = await Promise.all([
     Order.find(filter)
       .populate("tenantId", "name slug")
@@ -57,8 +85,17 @@ export async function getOrder(req, id) {
   const filter = isOid ? { _id: id } : { orderNumber: id };
   if (ownOrdersOnly(req)) filter.buyerId = req.user._id;
   else Object.assign(filter, tenantFilter(req));
-  const order = await Order.findOne(filter);
+  const order = await Order.findOne(filter)
+    .populate("tenantId", "name slug")
+    .populate("buyerId", "name email phone profile");
   if (!order) throw new AppError(404, "Order not found", "NOT_FOUND");
+  return order;
+}
+
+export async function updateNotes(req, id, { sellerNotes } = {}) {
+  const order = await getOrder(req, id);
+  if (sellerNotes !== undefined) order.sellerNotes = String(sellerNotes || "");
+  await order.save();
   return order;
 }
 

@@ -51,6 +51,9 @@ export const createProductSchema = z.object({
     taxClass: z.object({ name: z.string().optional(), rate: z.number().min(0).max(100).optional() }).optional(),
     status: z.enum(PRODUCT_STATUSES).optional(),
     scheduledAt: z.coerce.date().optional(),
+    sellingPrice: z.number().min(0).optional(),
+    listPrice: z.number().min(0).optional(),
+    packSize: z.string().max(40).optional(),
     wholesale: z
       .object({
         moq: z.number().min(1).optional(),
@@ -58,6 +61,32 @@ export const createProductSchema = z.object({
         packMultiple: z.number().min(1).optional(),
         caseQty: z.number().min(1).optional(),
         leadTimeDays: z.number().min(0).optional(),
+      })
+      .optional(),
+    variant: z
+      .object({
+        sku: z.string().min(1).max(80).optional(),
+        barcode: z.string().optional(),
+        attributes: z.object({}).passthrough().optional(),
+        listPrice: z.number().min(0),
+        sellingPrice: z.number().min(0),
+        tierPrices: z
+          .array(
+            z.object({
+              minQty: z.number().min(1),
+              maxQty: z.number().nullable().optional(),
+              unitPrice: z.number().min(0),
+            })
+          )
+          .optional(),
+        status: z.enum(["active", "inactive"]).optional(),
+      })
+      .optional(),
+    initialStock: z
+      .object({
+        warehouseId: objectId,
+        qty: z.number().int().min(0),
+        lowStockThreshold: z.number().int().min(0).optional(),
       })
       .optional(),
   }),

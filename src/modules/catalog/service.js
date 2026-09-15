@@ -12,6 +12,12 @@ import { tenantFilter } from "../../middleware/tenantScope.js";
 import { storage } from "../../utils/storage.js";
 import { checkServiceability } from "../location/service.js";
 import { emitDomain } from "../../utils/events.js";
+import {
+  applyOffersToVariants,
+  loadActiveOffers,
+  matchingOffers,
+  serializeOffer,
+} from "../pricing/engine.js";
 
 export async function listCategories(query) {
   const filter = {};
@@ -43,6 +49,21 @@ export async function listBrands(req) {
   return Brand.find(tenantFilter(req)).sort({ name: 1 });
 }
 
+export async function listPublicBrands() {
+  return Brand.aggregate([
+    { $match: { status: "active" } },
+    {
+      $group: {
+        _id: "$slug",
+        name: { $first: "$name" },
+        slug: { $first: "$slug" },
+        logo: { $first: "$logo" },
+      },
+    },
+    { $sort: { name: 1 } },
+  ]);
+}
+
 export async function createBrand(req, body) {
   const slug = slugify(body.slug || body.name);
   return Brand.create({ ...body, slug, tenantId: req.tenantId });
@@ -71,10 +92,13 @@ export async function listProducts(req, { buyer = false } = {}) {
   if (req.query.categoryId) filter.categoryId = req.query.categoryId;
   if (req.query.brandId) filter.brandId = req.query.brandId;
   if (req.query.status && !buyer) filter.status = req.query.status;
-  if (req.query.q) filter.$text = { $search: req.query.q };
   if (req.query.tag) filter.tags = req.query.tag;
+  if (req.query.q) {
+    const rx = new RegExp(String(req.query.q).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    filter.$or = [{ name: rx }, { sku: rx }, { tags: rx }, { description: rx }];
+  }
 
-  const [data, total] = await Promise.all([
+  const [rows, total] = await Promise.all([
     Product.find(filter)
       .populate("categoryId", "name slug")
       .populate("brandId", "name slug")
@@ -84,6 +108,49 @@ export async function listProducts(req, { buyer = false } = {}) {
       .limit(limit),
     Product.countDocuments(filter),
   ]);
+
+  if (buyer) return paginated(rows, total, { page, limit });
+
+  const ids = rows.map((p) => p._id);
+  const variants = ids.length ? await ProductVariant.find({ productId: { $in: ids } }).lean() : [];
+  const variantIds = variants.map((v) => v._id);
+  const stocks = variantIds.length
+    ? await Inventory.aggregate([
+        { $match: { variantId: { $in: variantIds } } },
+        {
+          $group: {
+            _id: "$variantId",
+            available: { $sum: "$available" },
+            reserved: { $sum: "$reserved" },
+          },
+        },
+      ])
+    : [];
+  const stockByVariant = new Map(stocks.map((s) => [String(s._id), s]));
+  const byProduct = new Map();
+  for (const v of variants) {
+    const key = String(v.productId);
+    if (!byProduct.has(key)) byProduct.set(key, []);
+    byProduct.get(key).push(v);
+  }
+
+  const data = rows.map((p) => {
+    const vs = byProduct.get(String(p._id)) || [];
+    const available = vs.reduce((sum, v) => sum + (stockByVariant.get(String(v._id))?.available || 0), 0);
+    const reserved = vs.reduce((sum, v) => sum + (stockByVariant.get(String(v._id))?.reserved || 0), 0);
+    const prices = vs.map((v) => v.sellingPrice).filter((n) => n != null);
+    return {
+      ...p.toObject(),
+      variantsCount: vs.length,
+      available,
+      reserved,
+      sellingPrice: prices.length ? Math.min(...prices) : null,
+      listPrice: vs[0]?.listPrice ?? null,
+      primaryVariantId: vs[0]?._id || null,
+      primarySku: vs[0]?.sku || p.sku,
+    };
+  });
+
   return paginated(data, total, { page, limit });
 }
 
@@ -99,15 +166,50 @@ export async function getProduct(req, id, { buyer = false } = {}) {
 
 export async function createProduct(req, body) {
   if (!req.tenantId) throw new AppError(400, "Tenant context required", "TENANT_REQUIRED");
-  return Product.create({ ...body, tenantId: req.tenantId });
+  const { variant, initialStock, sellingPrice, listPrice, packSize, ...rest } = body;
+  const product = await Product.create({
+    ...rest,
+    sku: String(rest.sku || "").toUpperCase(),
+    tenantId: req.tenantId,
+  });
+
+  const variantBody = variant || {
+    sku: product.sku,
+    listPrice: Number(listPrice ?? sellingPrice ?? 0),
+    sellingPrice: Number(sellingPrice ?? listPrice ?? 0),
+    attributes: { packSize: packSize || "1 pc" },
+  };
+
+  const created = await ProductVariant.create({
+    ...variantBody,
+    sku: String(variantBody.sku || product.sku).toUpperCase(),
+    tenantId: req.tenantId,
+    productId: product._id,
+  });
+  if (initialStock?.warehouseId && Number(initialStock.qty) >= 0) {
+    await Inventory.create({
+      tenantId: req.tenantId,
+      warehouseId: initialStock.warehouseId,
+      variantId: created._id,
+      sku: created.sku,
+      available: Number(initialStock.qty) || 0,
+      lowStockThreshold: initialStock.lowStockThreshold ?? 10,
+    });
+  }
+
+  return product;
 }
 
 export async function updateProduct(req, id, body) {
-  const product = await Product.findOneAndUpdate({ _id: id, ...tenantFilter(req) }, body, {
+  const { variant, initialStock, ...rest } = body;
+  if (rest.sku) rest.sku = String(rest.sku).toUpperCase();
+  const product = await Product.findOneAndUpdate({ _id: id, ...tenantFilter(req) }, rest, {
     new: true,
     runValidators: true,
   });
   if (!product) throw new AppError(404, "Product not found", "NOT_FOUND");
+  void variant;
+  void initialStock;
   return product;
 }
 
@@ -164,7 +266,13 @@ export async function publishProduct(req, id) {
   return product;
 }
 
-export async function lookupBySlug(slug, pack) {
+function withCatalogOffers(product, variants, offers, buyerId) {
+  const decorated = applyOffersToVariants(variants, offers, product, buyerId);
+  const liveOffers = matchingOffers(offers, product, buyerId).map(serializeOffer).filter(Boolean);
+  return { variants: decorated, offers: liveOffers };
+}
+
+export async function lookupBySlug(slug, pack, req) {
   if (!slug) throw new AppError(400, "slug is required", "VALIDATION_ERROR");
   const product = await Product.findOne({ sku: String(slug).toUpperCase(), status: "published" })
     .populate("categoryId", "name slug")
@@ -172,11 +280,18 @@ export async function lookupBySlug(slug, pack) {
   if (!product) throw new AppError(404, "Product not found", "NOT_FOUND");
   const variants = await ProductVariant.find({ productId: product._id, status: "active" });
   if (!variants.length) throw new AppError(404, "Variant not found", "NOT_FOUND");
-  let variant = variants[0];
+  const offers = await loadActiveOffers([product.tenantId]);
+  const { variants: decorated, offers: liveOffers } = withCatalogOffers(
+    product,
+    variants,
+    offers,
+    req?.user?._id
+  );
+  let variant = decorated[0];
   if (pack) {
     const wanted = String(pack).toLowerCase().replace(/\s+/g, " ").trim();
     variant =
-      variants.find((v) => {
+      decorated.find((v) => {
         const size = String(v.attributes?.packSize || v.attributes?.size || "")
           .toLowerCase()
           .replace(/\s+/g, " ")
@@ -186,9 +301,10 @@ export async function lookupBySlug(slug, pack) {
   }
   return {
     slug: String(product.sku || "").toLowerCase(),
-    product,
+    product: { ...product.toObject(), offers: liveOffers },
     variant,
-    variants,
+    variants: decorated,
+    offers: liveOffers,
   };
 }
 
@@ -210,7 +326,16 @@ export async function searchCatalog(req) {
   if (req.query.category && req.query.category !== "all") {
     const cat = await Category.findOne({ slug: String(req.query.category).toLowerCase() });
     if (!cat) return paginated([], 0, { page, limit });
-    filter.categoryId = cat._id;
+    const children = await Category.find({ parentId: cat._id }).select("_id");
+    filter.categoryId = { $in: [cat._id, ...children.map((c) => c._id)] };
+  }
+
+  if (req.query.brand) {
+    const raw = String(req.query.brand).trim();
+    const rx = new RegExp(raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    const brands = await Brand.find({ $or: [{ slug: raw.toLowerCase() }, { name: rx }] }).select("_id");
+    if (!brands.length) return paginated([], 0, { page, limit });
+    filter.brandId = { $in: brands.map((b) => b._id) };
   }
 
   if (req.query.postalCode && !req.query.tenantId) {
@@ -244,12 +369,20 @@ export async function searchCatalog(req) {
     byProduct.get(key).push(v);
   }
 
+  const offers = await loadActiveOffers(products.map((p) => p.tenantId));
+  const buyerId = req.user?._id;
   let minPrice = req.query.minPrice != null ? Number(req.query.minPrice) : null;
   let maxPrice = req.query.maxPrice != null ? Number(req.query.maxPrice) : null;
 
   const data = [];
   for (const p of products) {
-    let vs = byProduct.get(String(p._id)) || [];
+    const { variants: vs0, offers: liveOffers } = withCatalogOffers(
+      p,
+      byProduct.get(String(p._id)) || [],
+      offers,
+      buyerId
+    );
+    let vs = vs0;
     if (minPrice != null) vs = vs.filter((v) => v.sellingPrice >= minPrice);
     if (maxPrice != null) vs = vs.filter((v) => v.sellingPrice <= maxPrice);
     if ((minPrice != null || maxPrice != null) && vs.length === 0) continue;
@@ -264,7 +397,7 @@ export async function searchCatalog(req) {
       if (!available) continue;
     }
 
-    data.push({ ...p.toObject(), variants: vs });
+    data.push({ ...p.toObject(), variants: vs, offers: liveOffers });
   }
 
   const sort = req.query.sort;

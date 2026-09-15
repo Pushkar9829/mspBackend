@@ -301,7 +301,11 @@ const CATALOG = [
     manufacturer: "Mahashian Di Hatti Pvt. Ltd.",
     newLaunch: true,
   },
-];
+].map((item) => ({
+  ...item,
+  image: "/products/product.png",
+  gallery: ["/products/product.png"],
+}));
 
 function slugPack(pack) {
   return String(pack)
@@ -1144,6 +1148,62 @@ export async function seedDemoCatalog() {
       {
         $set: {
           tenantId: tenant._id,
+          slug: page.slug,
+          title: page.title,
+          type: page.type,
+          status: "published",
+          sections: page.sections,
+          seo: { title: page.title, description: page.title, canonical: `/${page.slug}` },
+          scheduledAt: null,
+          publishedAt: new Date(),
+        },
+      },
+      { upsert: true }
+    );
+  }
+
+  const platformCms = [
+    {
+      slug: "help",
+      title: "Help Centre",
+      type: "faq",
+      sections: [
+        { kind: "faq", q: "How long does shipping take?", a: "Metro pincodes typically arrive in 1–3 days. Bulk orders may ship from the nearest warehouse." },
+        { kind: "faq", q: "How do returns work?", a: "Unused, sealed packs can be returned within 7 days. Refunds go to the original payment method." },
+        { kind: "faq", q: "How do I contact support?", a: "Email support@msrmarket.local · Mon–Sat, 9am–7pm." },
+      ],
+    },
+    {
+      slug: "shipping",
+      title: "Shipping policy",
+      type: "shipping",
+      sections: [{ kind: "html", html: "<p>Orders in metro pincodes typically arrive in 1–3 days. Bulk orders may ship from the nearest warehouse.</p>" }],
+    },
+    {
+      slug: "returns",
+      title: "Returns & refunds",
+      type: "custom",
+      sections: [{ kind: "html", html: "<p>Unused, sealed packs can be returned within 7 days. Refunds are processed to the original payment method.</p>" }],
+    },
+    {
+      slug: "terms",
+      title: "Terms & conditions",
+      type: "terms",
+      sections: [{ kind: "html", html: "<p>By using MS₹ you agree to accurate listings, lawful use and our seller/buyer marketplace rules.</p>" }],
+    },
+    {
+      slug: "privacy",
+      title: "Privacy policy",
+      type: "privacy",
+      sections: [{ kind: "html", html: "<p>We store only what is needed to fulfil orders, authenticate users and improve the marketplace experience.</p>" }],
+    },
+  ];
+  for (const page of platformCms) {
+    await CmsPage.findOneAndUpdate(
+      { tenantId: null, slug: page.slug },
+      {
+        $set: {
+          tenantId: null,
           slug: page.slug,
           title: page.title,
           type: page.type,

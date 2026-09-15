@@ -1,5 +1,5 @@
 import { Server } from "socket.io";
-import { env } from "../config/env.js";
+import { isOriginAllowed } from "../config/env.js";
 import { verifyAccessToken } from "../utils/tokens.js";
 import { User } from "../modules/users/user.model.js";
 import { Role } from "../modules/rbac/role.model.js";
@@ -7,7 +7,13 @@ import { setIo } from "../utils/io.js";
 
 export function attachSockets(httpServer) {
   const io = new Server(httpServer, {
-    cors: { origin: env.corsOrigin, credentials: true },
+    cors: {
+      origin(origin, callback) {
+        if (isOriginAllowed(origin)) return callback(null, true);
+        return callback(null, false);
+      },
+      credentials: true,
+    },
   });
   setIo(io);
 

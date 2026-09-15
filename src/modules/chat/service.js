@@ -1,5 +1,6 @@
 import { Conversation } from "./conversation.model.js";
 import { Message } from "./message.model.js";
+import { User } from "../users/user.model.js";
 import { AppError } from "../../utils/AppError.js";
 import { tenantFilter } from "../../middleware/tenantScope.js";
 import { paginate, paginated } from "../../utils/pagination.js";
@@ -48,17 +49,32 @@ export async function startConversation(req, body) {
   return convo;
 }
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export async function listConversations(req) {
   const { page, limit, skip } = paginate(req.query);
   const filter = {};
   if (isBuyer(req)) {
     filter.buyerId = req.user._id;
+    if (req.query.status) filter.status = req.query.status;
   } else {
     Object.assign(filter, tenantFilter(req));
     if (req.query.queue === "unassigned") filter.status = "unassigned";
     if (req.query.queue === "mine") filter.assigneeId = req.user._id;
     if (req.query.queue === "waiting") filter.status = "waiting_customer";
     if (req.query.status) filter.status = req.query.status;
+    if (req.query.type) filter.type = req.query.type;
+  }
+  if (req.query.q) {
+    const rx = new RegExp(escapeRegex(req.query.q.trim()), "i");
+    const buyers = await User.find({ $or: [{ name: rx }, { email: rx }] })
+      .select("_id")
+      .limit(25);
+    const or = [{ subject: rx }];
+    if (buyers.length) or.push({ buyerId: { $in: buyers.map((u) => u._id) } });
+    filter.$or = or;
   }
   const [data, total] = await Promise.all([
     Conversation.find(filter)
@@ -74,21 +90,30 @@ export async function listConversations(req) {
 }
 
 export async function getConversation(req, id) {
-  const convo = await Conversation.findById(id);
+  const convo = await Conversation.findById(id)
+    .populate("buyerId", "name email")
+    .populate("assigneeId", "name email")
+    .populate("tenantId", "name slug");
   if (!convo) throw new AppError(404, "Conversation not found", "NOT_FOUND");
   assertAccess(req, convo);
   return convo;
 }
 
+function refId(value) {
+  if (!value) return "";
+  if (typeof value === "object") return String(value._id || value.id || "");
+  return String(value);
+}
+
 function assertAccess(req, convo) {
   if (req.isPlatformAdmin) return;
-  if (isBuyer(req) && String(convo.buyerId) !== String(req.user._id)) {
+  if (isBuyer(req) && refId(convo.buyerId) !== String(req.user._id)) {
     throw new AppError(403, "Forbidden", "FORBIDDEN");
   }
   if (
     !isBuyer(req) &&
     req.tenantId &&
-    String(convo.tenantId) !== String(req.tenantId) &&
+    refId(convo.tenantId) !== String(req.tenantId) &&
     !convo.escalated
   ) {
     throw new AppError(403, "Forbidden", "FORBIDDEN");
@@ -99,7 +124,7 @@ export async function listMessages(req, conversationId) {
   const convo = await getConversation(req, conversationId);
   const filter = { conversationId: convo._id };
   if (isBuyer(req)) filter.internal = false;
-  return Message.find(filter).sort({ createdAt: 1 }).limit(500);
+  return Message.find(filter).populate("senderId", "name email").sort({ createdAt: 1 }).limit(500);
 }
 
 export async function postMessage(req, conversationId, body) {
@@ -123,6 +148,7 @@ export async function postMessage(req, conversationId, body) {
     convo.status = convo.assigneeId ? "assigned" : "unassigned";
   }
   await convo.save();
+  await msg.populate("senderId", "name email");
   emitToConversation(convo._id, "chat:message", msg);
   emitDomain("CHAT_MESSAGE", {
     conversationId: convo._id,

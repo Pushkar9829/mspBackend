@@ -37,6 +37,14 @@ export const resetSchema = z.object({
   }),
 });
 
+export const updateMeSchema = z.object({
+  body: z.object({
+    name: z.string().min(2).max(120).optional(),
+    phone: z.string().max(20).optional(),
+    profile: z.object({}).passthrough().optional(),
+  }),
+});
+
 export const changePasswordSchema = z.object({
   body: z.object({
     currentPassword: z.string().min(1),

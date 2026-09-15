@@ -9,14 +9,23 @@ import { SYSTEM_ROLES } from "../../config/constants.js";
 import { SALT } from "../auth/service.js";
 import { emitDomain } from "../../utils/events.js";
 
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export async function listTenants(query) {
   const { page, limit, skip } = paginate(query);
   const filter = {};
   if (query.status) filter.status = query.status;
   if (query.q) {
+    const rx = new RegExp(escapeRegex(query.q.trim()), "i");
     filter.$or = [
-      { name: new RegExp(query.q, "i") },
-      { slug: new RegExp(query.q, "i") },
+      { name: rx },
+      { slug: rx },
+      { "businessProfile.legalName": rx },
+      { "businessProfile.email": rx },
+      { "businessProfile.gstin": rx },
+      { "deliveryZones.name": rx },
     ];
   }
   const [data, total] = await Promise.all([

@@ -11,6 +11,7 @@ import {
   forgotSchema,
   resetSchema,
   changePasswordSchema,
+  updateMeSchema,
 } from "./validators.js";
 
 const router = Router();
@@ -20,6 +21,7 @@ router.post("/login", loginLimiter, validate(loginSchema), audit("login", "auth"
 router.post("/refresh", validate(refreshSchema), ctrl.refresh);
 router.post("/logout", authenticate, ctrl.logout);
 router.get("/me", authenticate, ctrl.me);
+router.patch("/me", authenticate, validate(updateMeSchema), ctrl.updateMe);
 router.post("/forgot-password", resetLimiter, validate(forgotSchema), ctrl.forgotPassword);
 router.post("/reset-password", resetLimiter, validate(resetSchema), ctrl.resetPassword);
 router.post(

@@ -8,6 +8,9 @@ import * as service from "./service.js";
 const router = Router();
 router.use(authenticate, resolveTenant, authorizeAny("analytics.view", "reports.view", "audit.view"));
 
+router.get("/catalog", asyncHandler(async (_req, res) => {
+  res.json(service.catalog());
+}));
 router.get("/overview", asyncHandler(async (req, res) => {
   res.json(await service.overview(req));
 }));
@@ -16,6 +19,9 @@ router.get("/by-date", asyncHandler(async (req, res) => {
 }));
 router.get("/by-event", asyncHandler(async (req, res) => {
   res.json(await service.byEvent(req));
+}));
+router.get("/by-tenant", asyncHandler(async (req, res) => {
+  res.json(await service.byTenant(req));
 }));
 router.get("/important", asyncHandler(async (req, res) => {
   res.json(await service.important(req));

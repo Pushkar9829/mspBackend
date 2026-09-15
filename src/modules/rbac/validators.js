@@ -8,6 +8,7 @@ export const createRoleSchema = z.object({
     slug: z.string().min(2).max(80).optional(),
     permissions: z.array(z.string()).default([]),
     description: z.string().max(300).optional(),
+    tenantId: objectId.optional(),
   }),
 });
 

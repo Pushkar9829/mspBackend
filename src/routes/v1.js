@@ -23,6 +23,7 @@ import { cmsPublicRouter, cmsAdminRouter } from "../modules/cms/routes.js";
 import reportRoutes from "../modules/reports/routes.js";
 import analyticsRoutes from "../modules/analytics/routes.js";
 import settingsRoutes from "../modules/settings/routes.js";
+import searchRoutes from "../modules/search/routes.js";
 
 const v1 = Router();
 
@@ -54,5 +55,6 @@ v1.use("/cms/admin", cmsAdminRouter);
 v1.use("/reports", reportRoutes);
 v1.use("/analytics", analyticsRoutes);
 v1.use("/settings", settingsRoutes);
+v1.use("/search", searchRoutes);
 
 export default v1;

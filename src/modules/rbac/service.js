@@ -3,19 +3,29 @@ import { Permission } from "./permission.model.js";
 import { AppError } from "../../utils/AppError.js";
 import { slugify } from "../../utils/slug.js";
 import { PERMISSIONS } from "../../config/constants.js";
-import { tenantFilter } from "../../middleware/tenantScope.js";
 
 export async function listPermissions() {
   return Permission.find().sort({ resource: 1, action: 1 });
 }
 
 export async function listRoles(req) {
-  const filter = tenantFilter(req);
+  const clauses = [];
   if (!req.isPlatformAdmin) {
-    filter.$or = [{ tenantId: req.tenantId }, { isSystem: true, scope: "tenant" }];
-    delete filter.tenantId;
+    clauses.push({ $or: [{ tenantId: req.tenantId }, { isSystem: true, scope: "tenant" }] });
+  } else if (req.tenantId) {
+    clauses.push({
+      $or: [{ tenantId: req.tenantId }, { isSystem: true }, { tenantId: null, scope: "platform" }],
+    });
   }
-  return Role.find(filter).sort({ isSystem: -1, name: 1 });
+  if (req.query.scope) clauses.push({ scope: req.query.scope });
+  if (req.query.system === "true") clauses.push({ isSystem: true });
+  if (req.query.system === "false") clauses.push({ isSystem: false });
+  if (req.query.q) {
+    const rx = new RegExp(String(req.query.q).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    clauses.push({ $or: [{ name: rx }, { slug: rx }, { description: rx }] });
+  }
+  const filter = clauses.length ? { $and: clauses } : {};
+  return Role.find(filter).populate("tenantId", "name slug").sort({ isSystem: -1, name: 1 });
 }
 
 export async function getRole(req, id) {
@@ -39,7 +49,7 @@ export async function createRole(req, body) {
     throw new AppError(400, "Tenant context required", "TENANT_REQUIRED");
   }
   const slug = slugify(body.slug || body.name);
-  const tenantId = req.isPlatformAdmin ? req.tenantId : req.tenantId;
+  const tenantId = req.isPlatformAdmin ? body.tenantId || req.tenantId || null : req.tenantId;
   const exists = await Role.findOne({ slug, tenantId: tenantId || null });
   if (exists) throw new AppError(409, "Role slug already exists", "DUPLICATE");
 

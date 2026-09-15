@@ -4,13 +4,14 @@ import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import path from "path";
 import mongoose from "mongoose";
-import { env } from "./config/env.js";
+import { env, isOriginAllowed } from "./config/env.js";
 import { requestId } from "./middleware/requestId.js";
 import { notFound, errorHandler } from "./middleware/error.js";
 import v1 from "./routes/v1.js";
 
 export function createApp() {
   const app = express();
+  app.set("trust proxy", 1);
 
   app.use(requestId);
   app.use(
@@ -20,8 +21,18 @@ export function createApp() {
   );
   app.use(
     cors({
-      origin: env.corsOrigin,
+      origin(origin, callback) {
+        if (isOriginAllowed(origin)) return callback(null, true);
+        return callback(null, false);
+      },
       credentials: true,
+      allowedHeaders: [
+        "Content-Type",
+        "Authorization",
+        "X-Tenant-Id",
+        "X-Guest-Key",
+        "Idempotency-Key",
+      ],
     })
   );
   app.use(express.json({ limit: "2mb" }));

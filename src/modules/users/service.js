@@ -5,20 +5,55 @@ import { AppError } from "../../utils/AppError.js";
 import { paginate, paginated } from "../../utils/pagination.js";
 import { tenantFilter } from "../../middleware/tenantScope.js";
 import { toPublicUser, SALT } from "../auth/service.js";
+import { SYSTEM_ROLES } from "../../config/constants.js";
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseDate(value, endOfDay = false) {
+  if (!value) return null;
+  if (endOfDay && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const d = new Date(`${value}T23:59:59.999`);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
 
 export async function listUsers(req) {
   const { page, limit, skip } = paginate(req.query);
   const filter = tenantFilter(req);
   if (req.query.status) filter.status = req.query.status;
-  if (req.query.role) {
-    const role = await Role.findOne({ slug: req.query.role });
-    if (role) filter.roleId = role._id;
+  if (req.query.roleId) {
+    filter.roleId = req.query.roleId;
+  } else if (req.query.role) {
+    const roles = await Role.find({ slug: req.query.role }).select("_id isSystem tenantId");
+    if (!roles.length) {
+      filter.roleId = null;
+    } else if (req.tenantId) {
+      const picked =
+        roles.find((r) => r.isSystem) ||
+        roles.find((r) => String(r.tenantId) === String(req.tenantId)) ||
+        roles[0];
+      filter.roleId = picked._id;
+    } else {
+      filter.roleId = { $in: roles.map((r) => r._id) };
+    }
+  } else if (req.query.staff === "true") {
+    const buyer = await Role.findOne({ slug: SYSTEM_ROLES.BUYER, isSystem: true });
+    if (buyer) filter.roleId = { $ne: buyer._id };
+  }
+  const from = parseDate(req.query.from);
+  const to = parseDate(req.query.to, true);
+  if (from || to) {
+    filter.createdAt = {};
+    if (from) filter.createdAt.$gte = from;
+    if (to) filter.createdAt.$lte = to;
   }
   if (req.query.q) {
-    filter.$or = [
-      { name: new RegExp(req.query.q, "i") },
-      { email: new RegExp(req.query.q, "i") },
-    ];
+    const rx = new RegExp(escapeRegex(req.query.q.trim()), "i");
+    filter.$or = [{ name: rx }, { email: rx }, { phone: rx }, { "profile.company": rx }];
   }
   const [rows, total] = await Promise.all([
     User.find(filter).populate("roleId").populate("tenantId", "name slug").sort({ createdAt: -1 }).skip(skip).limit(limit),
