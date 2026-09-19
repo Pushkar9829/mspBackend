@@ -15,6 +15,8 @@ import { withTransaction } from "../../utils/transaction.js";
 import { AppError } from "../../utils/AppError.js";
 import { emitDomain } from "../../utils/events.js";
 import { PAYMENT_METHODS } from "../../config/constants.js";
+import * as ledger from "../ledger/service.js";
+import { resolveFulfillment } from "../cart/service.js";
 
 function offerIdsFromItems(items) {
   const ids = new Set();
@@ -26,14 +28,14 @@ function offerIdsFromItems(items) {
   return [...ids];
 }
 
-export async function previewCheckout({ user, addressId }) {
+export async function previewCheckout({ user, addressId, deliveryPartnerId }) {
   const cart = await getOrCreateCart(user._id);
   if (!cart.items.length) throw new AppError(400, "Cart is empty", "EMPTY_CART");
   const address = await getAddressForUser(user._id, addressId);
-  return quoteCart(cart, user._id, address);
+  return quoteCart(cart, user._id, address, { deliveryPartnerId });
 }
 
-export async function checkout({ user, addressId, paymentMethod, poNumber, buyerNotes, idempotencyKey }) {
+export async function checkout({ user, addressId, paymentMethod, poNumber, buyerNotes, idempotencyKey, deliveryPartnerId }) {
   if (!idempotencyKey) throw new AppError(400, "Idempotency-Key header required", "IDEMPOTENCY");
   if (!PAYMENT_METHODS.includes(paymentMethod || "purchase_order")) {
     throw new AppError(400, "Invalid payment method", "VALIDATION_ERROR");
@@ -47,7 +49,7 @@ export async function checkout({ user, addressId, paymentMethod, poNumber, buyer
   const cart = await getOrCreateCart(user._id);
   if (!cart.items.length) throw new AppError(400, "Cart is empty", "EMPTY_CART");
   const address = await getAddressForUser(user._id, addressId);
-  const quote = await quoteCart(cart, user._id, address);
+  const quote = await quoteCart(cart, user._id, address, { deliveryPartnerId });
 
   const reserved = [];
   let createdOrders = [];
@@ -97,6 +99,8 @@ export async function checkout({ user, addressId, paymentMethod, poNumber, buyer
             lineTotal: i.lineTotal,
             warehouseId: i.warehouseId,
             breakdown: i.breakdown,
+            fulfillmentMode: resolveFulfillment({ deliveryModes: i.deliveryModes }, i.fulfillmentMode),
+            easyReturn: Boolean(i.easyReturn),
           })),
           addressSnapshot: address.toObject ? address.toObject() : address,
           couponCode: group.couponCode,
@@ -104,11 +108,21 @@ export async function checkout({ user, addressId, paymentMethod, poNumber, buyer
           subtotal: group.subtotal,
           tax: group.tax,
           deliveryFee: group.deliveryFee,
+          platformFee: group.platformFee || 0,
+          partnerFee: group.partnerFee || 0,
+          deliveryPartner: group.deliveryPartner
+            ? {
+                id: group.deliveryPartner.id,
+                name: group.deliveryPartner.name,
+                fee: group.deliveryPartner.fee,
+              }
+            : undefined,
           total: group.total,
           paymentMethod: paymentMethod || "purchase_order",
           paymentStatus: "unpaid",
           poNumber: poNumber || "",
           buyerNotes: buyerNotes || "",
+          ledgerDebit: 0,
           idempotencyKey,
           etaFrom: group.eta?.etaFrom,
           etaTo: group.eta?.etaTo,
@@ -180,6 +194,11 @@ export async function checkout({ user, addressId, paymentMethod, poNumber, buyer
   }
 
   for (const order of createdOrders) {
+    try {
+      await ledger.debitOrder(order);
+    } catch (err) {
+      console.error("ledger debit failed", err.message);
+    }
     emitDomain("ORDER_CREATED", {
       orderId: order._id,
       tenantId: order.tenantId,
@@ -259,6 +278,11 @@ export async function cancelOrder(order, actorId, note, { timeout = false } = {}
     note: note || (timeout ? "Reservation timeout" : "Cancelled"),
   });
   await order.save();
+  try {
+    await ledger.creditOrder(order, note || "Order cancelled");
+  } catch (err) {
+    console.error("ledger credit failed", err.message);
+  }
   emitDomain(timeout ? "ORDER_TIMEOUT" : "ORDER_CANCELLED", {
     orderId: order._id,
     tenantId: order.tenantId,
@@ -282,6 +306,11 @@ export async function refundOrder(order, actorId, note) {
   order.paymentStatus = "refunded";
   order.statusHistory.push({ status: "refunded", actorId, note: note || "Refunded" });
   await order.save();
+  try {
+    await ledger.creditOrder(order, note || "Order refunded");
+  } catch (err) {
+    console.error("ledger credit failed", err.message);
+  }
   emitDomain("ORDER_REFUNDED", {
     orderId: order._id,
     tenantId: order.tenantId,

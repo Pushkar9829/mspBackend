@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { PRODUCT_STATUSES } from "../../config/constants.js";
+import { FULFILLMENT_MODES, PRODUCT_STATUSES } from "../../config/constants.js";
 
 const productSchema = new mongoose.Schema(
   {
@@ -21,6 +21,11 @@ const productSchema = new mongoose.Schema(
     },
     status: { type: String, enum: PRODUCT_STATUSES, default: "draft", index: true },
     scheduledAt: { type: Date, default: null },
+    easyReturn: { type: Boolean, default: false },
+    deliveryModes: {
+      type: [{ type: String, enum: FULFILLMENT_MODES }],
+      default: () => ["delivery_partner"],
+    },
     wholesale: {
       moq: { type: Number, default: 1 },
       maxQty: { type: Number, default: null },

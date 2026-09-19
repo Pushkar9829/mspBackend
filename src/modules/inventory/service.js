@@ -131,6 +131,10 @@ export async function adjustStock(req, { warehouseId, variantId, reason, qty, no
   });
 
   await maybeAlertStock(stock);
+  if (qty > 0 && stock.available > 0 && ["inward", "return", "adjustment"].includes(reason)) {
+    const { notifyRestockForVariant } = await import("../catalog/restock.js");
+    void notifyRestockForVariant(variantId).catch(() => {});
+  }
   return stock;
 }
 

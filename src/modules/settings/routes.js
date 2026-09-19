@@ -5,6 +5,20 @@ import { resolveTenant } from "../../middleware/tenantScope.js";
 import { audit } from "../../middleware/audit.js";
 import { asyncHandler } from "../../utils/asyncHandler.js";
 import * as service from "./service.js";
+import { getCommerceSettings, publicCommerce } from "./commerce.js";
+
+export const settingsPublicRouter = Router();
+settingsPublicRouter.get(
+  "/public",
+  asyncHandler(async (_req, res) => {
+    const [name, slogan, commerce] = await Promise.all([
+      service.getSetting("platform", null, "platform.name", "MSP Wholesale Marketplace"),
+      service.getSetting("platform", null, "platform.slogan", "भाव भी भरोसा भी"),
+      getCommerceSettings(),
+    ]);
+    res.json({ name, slogan, ...publicCommerce(commerce) });
+  })
+);
 
 const router = Router();
 router.use(authenticate, resolveTenant, authorizeAny("settings.view", "settings.edit", "tenants.edit", "notifications.manage"));

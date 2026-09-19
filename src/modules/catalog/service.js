@@ -287,11 +287,22 @@ export async function lookupBySlug(slug, pack, req) {
     offers,
     req?.user?._id
   );
-  let variant = decorated[0];
+  const stocks = decorated.length
+    ? await Inventory.aggregate([
+        { $match: { variantId: { $in: decorated.map((row) => row._id) } } },
+        { $group: { _id: "$variantId", available: { $sum: "$available" } } },
+      ])
+    : [];
+  const stockByVariant = new Map(stocks.map((row) => [String(row._id), row.available || 0]));
+  const withStock = decorated.map((row) => ({
+    ...(row.toObject ? row.toObject() : row),
+    available: stockByVariant.get(String(row._id)) || 0,
+  }));
+  let variant = withStock[0];
   if (pack) {
     const wanted = String(pack).toLowerCase().replace(/\s+/g, " ").trim();
     variant =
-      decorated.find((v) => {
+      withStock.find((v) => {
         const size = String(v.attributes?.packSize || v.attributes?.size || "")
           .toLowerCase()
           .replace(/\s+/g, " ")
@@ -299,12 +310,19 @@ export async function lookupBySlug(slug, pack, req) {
         return size === wanted;
       }) || variant;
   }
+  const available = withStock.reduce((sum, row) => sum + (Number(row.available) || 0), 0);
   return {
     slug: String(product.sku || "").toLowerCase(),
-    product: { ...product.toObject(), offers: liveOffers },
+    product: {
+      ...product.toObject(),
+      offers: liveOffers,
+      available,
+      orderLimit: product.wholesale?.maxQty ?? null,
+    },
     variant,
-    variants: decorated,
+    variants: withStock,
     offers: liveOffers,
+    available,
   };
 }
 

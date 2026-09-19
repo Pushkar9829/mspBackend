@@ -6,6 +6,7 @@ const cartItemSchema = new mongoose.Schema(
     productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
     variantId: { type: mongoose.Schema.Types.ObjectId, ref: "ProductVariant", required: true },
     qty: { type: Number, required: true, min: 1 },
+    fulfillmentMode: { type: String, enum: ["store_pickup", "delivery_partner"], default: "delivery_partner" },
   },
   { _id: true }
 );

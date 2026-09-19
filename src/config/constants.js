@@ -31,6 +31,8 @@ export const ORDER_STATUSES = [
 
 export const PAYMENT_METHODS = ["upi", "card", "netbanking", "cod", "purchase_order", "credit_terms"];
 
+export const FULFILLMENT_MODES = ["store_pickup", "delivery_partner"];
+
 export const PAYMENT_STATUSES = [
   "unpaid",
   "pending",

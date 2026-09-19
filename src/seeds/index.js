@@ -120,6 +120,7 @@ export async function seedFoundation() {
     ["platform.supportEmail", "support@msp.local"],
     ["platform.defaultTaxRate", 18],
     ["platform.mapsProvider", env.mapsProvider || "stub"],
+    ["platform.slogan", "भाव भी भरोसा भी"],
   ];
   for (const [key, value] of platformSettings) {
     await Settings.findOneAndUpdate(

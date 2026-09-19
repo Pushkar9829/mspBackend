@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import { ORDER_STATUSES, PAYMENT_METHODS, PAYMENT_STATUSES } from "../../config/constants.js";
+import { FULFILLMENT_MODES, ORDER_STATUSES, PAYMENT_METHODS, PAYMENT_STATUSES } from "../../config/constants.js";
 
 const orderItemSchema = new mongoose.Schema({
   tenantId: { type: mongoose.Schema.Types.ObjectId, ref: "Tenant", required: true },
@@ -19,6 +19,8 @@ const orderItemSchema = new mongoose.Schema({
   lineTotal: Number,
   warehouseId: { type: mongoose.Schema.Types.ObjectId, ref: "Warehouse" },
   breakdown: { type: mongoose.Schema.Types.Mixed, default: [] },
+  fulfillmentMode: { type: String, enum: FULFILLMENT_MODES, default: "delivery_partner" },
+  easyReturn: { type: Boolean, default: false },
 });
 
 const orderSchema = new mongoose.Schema(
@@ -34,12 +36,20 @@ const orderSchema = new mongoose.Schema(
     subtotal: { type: Number, required: true },
     tax: { type: Number, required: true },
     deliveryFee: { type: Number, default: 0 },
+    platformFee: { type: Number, default: 0 },
+    partnerFee: { type: Number, default: 0 },
+    deliveryPartner: {
+      id: { type: String, default: "" },
+      name: { type: String, default: "" },
+      fee: { type: Number, default: 0 },
+    },
     total: { type: Number, required: true },
     paymentMethod: { type: String, enum: PAYMENT_METHODS, default: "purchase_order" },
     paymentStatus: { type: String, enum: PAYMENT_STATUSES, default: "unpaid" },
     poNumber: { type: String, default: "" },
     buyerNotes: { type: String, default: "" },
     sellerNotes: { type: String, default: "" },
+    ledgerDebit: { type: Number, default: 0 },
     idempotencyKey: { type: String, default: "", index: true },
     etaFrom: Date,
     etaTo: Date,

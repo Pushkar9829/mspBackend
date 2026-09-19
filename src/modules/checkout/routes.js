@@ -36,7 +36,7 @@ cartRouter.get("/coupons", asyncHandler(async (req, res) => {
 
 cartRouter.post(
   "/items",
-  validate(z.object({ body: z.object({ variantId: objectId, qty: z.number().int().positive() }) })),
+  validate(z.object({ body: z.object({ variantId: objectId, qty: z.number().int().positive(), fulfillmentMode: z.enum(["store_pickup", "delivery_partner"]).optional() }) })),
   asyncHandler(async (req, res) => {
     const { userId, guestKey } = cartIdentity(req);
     res.json(await cartService.addItem(userId, guestKey, req.body));
@@ -82,9 +82,15 @@ export const checkoutRouter = Router();
 checkoutRouter.use(authenticate, authorize("orders.create"));
 checkoutRouter.post(
   "/preview",
-  validate(z.object({ body: z.object({ addressId: objectId }) })),
+  validate(z.object({ body: z.object({ addressId: objectId, deliveryPartnerId: z.string().max(80).optional() }) })),
   asyncHandler(async (req, res) => {
-    res.json(await checkoutService.previewCheckout({ user: req.user, addressId: req.body.addressId }));
+    res.json(
+      await checkoutService.previewCheckout({
+        user: req.user,
+        addressId: req.body.addressId,
+        deliveryPartnerId: req.body.deliveryPartnerId,
+      })
+    );
   })
 );
 checkoutRouter.post(
@@ -96,6 +102,7 @@ checkoutRouter.post(
         paymentMethod: PAYMENT.optional(),
         poNumber: z.string().optional(),
         buyerNotes: z.string().max(1000).optional(),
+        deliveryPartnerId: z.string().max(80).optional(),
       }),
     })
   ),
@@ -107,6 +114,7 @@ checkoutRouter.post(
       paymentMethod: req.body.paymentMethod,
       poNumber: req.body.poNumber,
       buyerNotes: req.body.buyerNotes,
+      deliveryPartnerId: req.body.deliveryPartnerId,
       idempotencyKey,
     });
     res.status(result.idempotent ? 200 : 201).json(result);

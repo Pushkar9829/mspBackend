@@ -6,7 +6,7 @@ import { tenantFilter } from "../../middleware/tenantScope.js";
 import { ORDER_STATUSES } from "../../config/constants.js";
 import { emitDomain } from "../../utils/events.js";
 import { confirmOrder, cancelOrder, refundOrder } from "../checkout/service.js";
-import { addItem, getOrCreateCart } from "../cart/service.js";
+import { addItem, getOrCreateCart, quoteCart } from "../cart/service.js";
 
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -141,9 +141,24 @@ export async function updateStatus(req, id, status, note) {
 
 export async function reorder(req, id) {
   const order = await getOrder(req, id);
-  let quote;
+  const added = [];
+  const skipped = [];
   for (const item of order.items) {
-    quote = await addItem(req.user._id, null, { variantId: item.variantId, qty: item.qty });
+    try {
+      await addItem(req.user._id, null, {
+        variantId: item.variantId,
+        qty: item.qty,
+        fulfillmentMode: item.fulfillmentMode,
+      });
+      added.push({ name: item.name, qty: item.qty });
+    } catch (err) {
+      skipped.push({ name: item.name, reason: err.message || "Unavailable" });
+    }
   }
-  return quote || (await getOrCreateCart(req.user._id));
+  if (!added.length) {
+    throw new AppError(409, skipped[0]?.reason || "Items are out of stock. Notify when restocked.", "REORDER_UNAVAILABLE");
+  }
+  const cart = await getOrCreateCart(req.user._id);
+  const quote = await quoteCart(cart, req.user._id);
+  return { ...quote, added, skipped };
 }

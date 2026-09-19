@@ -6,6 +6,16 @@ import { Coupon } from "../pricing/coupon.model.js";
 import { calculateLinePrice, applyCoupon, previewCoupon, round2 } from "../pricing/engine.js";
 import { pickWarehouseForVariant, availableForVariant } from "../inventory/service.js";
 import { checkServiceability, etaWindow } from "../location/service.js";
+import { FULFILLMENT_MODES } from "../../config/constants.js";
+import { computePlatformFee, getCommerceSettings, pickPartner } from "../settings/commerce.js";
+
+export function resolveFulfillment(product, requested) {
+  const modes = (product?.deliveryModes || []).filter((mode) => FULFILLMENT_MODES.includes(mode));
+  const allowed = modes.length ? modes : ["delivery_partner"];
+  if (requested && allowed.includes(requested)) return requested;
+  if (allowed.includes("delivery_partner")) return "delivery_partner";
+  return allowed[0];
+}
 
 export async function getOrCreateCart(userId, guestKey) {
   const filter = userId ? { userId } : { guestKey };
@@ -25,7 +35,7 @@ function validateWholesale(product, qty) {
   }
 }
 
-export async function addItem(userId, guestKey, { variantId, qty }) {
+export async function addItem(userId, guestKey, { variantId, qty, fulfillmentMode }) {
   const variant = await ProductVariant.findById(variantId);
   if (!variant || variant.status !== "active") throw new AppError(404, "Variant not found", "NOT_FOUND");
   const product = await Product.findById(variant.productId);
@@ -39,15 +49,18 @@ export async function addItem(userId, guestKey, { variantId, qty }) {
   validateWholesale(product, nextQty);
   const stock = await availableForVariant(variant._id);
   if (stock.available < nextQty) throw new AppError(409, "Insufficient stock", "INSUFFICIENT_STOCK");
+  const mode = resolveFulfillment(product, fulfillmentMode);
 
   if (existing) {
     existing.qty = nextQty;
+    existing.fulfillmentMode = mode;
   } else {
     cart.items.push({
       tenantId: product.tenantId,
       productId: product._id,
       variantId: variant._id,
       qty: nextQty,
+      fulfillmentMode: mode,
     });
   }
   await cart.save();
@@ -80,7 +93,7 @@ export async function applyCartCoupon(userId, guestKey, code) {
   return quote;
 }
 
-export async function quoteCart(cart, buyerId, address = null, { strictCoupon = false } = {}) {
+export async function quoteCart(cart, buyerId, address = null, { strictCoupon = false, deliveryPartnerId } = {}) {
   const lines = [];
   for (const item of cart.items) {
     const variant = await ProductVariant.findById(item.variantId);
@@ -115,6 +128,9 @@ export async function quoteCart(cart, buyerId, address = null, { strictCoupon = 
       warehouseId: stock.warehouseId?._id || stock.warehouseId,
       wholesale: product.wholesale,
       qty: item.qty,
+      fulfillmentMode: resolveFulfillment(product, item.fulfillmentMode),
+      easyReturn: Boolean(product.easyReturn),
+      deliveryModes: product.deliveryModes?.length ? product.deliveryModes : ["delivery_partner"],
       ...priced,
     });
   }
@@ -168,7 +184,14 @@ export async function quoteCart(cart, buyerId, address = null, { strictCoupon = 
       eta = etaWindow(serviceability.zone, lead);
     }
 
-    const total = round2(subtotal - couponDiscount + tax + deliveryFee);
+    const commerce = await getCommerceSettings(tenantId);
+    const hasDelivery = items.some((item) => item.fulfillmentMode === "delivery_partner");
+    const partner = hasDelivery
+      ? pickPartner(commerce.deliveryPartners, deliveryPartnerId, commerce.deliveryPartnerChoiceEnabled)
+      : null;
+    const platformFee = computePlatformFee(commerce, Math.max(0, subtotal - couponDiscount));
+    const partnerFee = hasDelivery && partner ? round2(partner.fee) : 0;
+    const total = round2(subtotal - couponDiscount + tax + deliveryFee + platformFee + partnerFee);
     groups.push({
       tenantId,
       items,
@@ -177,6 +200,12 @@ export async function quoteCart(cart, buyerId, address = null, { strictCoupon = 
       couponDiscount,
       tax,
       deliveryFee,
+      platformFee,
+      partnerFee,
+      deliveryPartner: partner,
+      deliveryPartnerChoiceEnabled: commerce.deliveryPartnerChoiceEnabled,
+      deliveryPartners: commerce.deliveryPartners,
+      platformFeeEnabled: commerce.feeEnabled,
       total,
       serviceability,
       eta,
@@ -187,7 +216,10 @@ export async function quoteCart(cart, buyerId, address = null, { strictCoupon = 
   const subtotal = round2(groups.reduce((s, g) => s + g.subtotal, 0));
   const tax = round2(groups.reduce((s, g) => s + g.tax, 0));
   const deliveryFee = round2(groups.reduce((s, g) => s + g.deliveryFee, 0));
+  const platformFee = round2(groups.reduce((s, g) => s + g.platformFee, 0));
+  const partnerFee = round2(groups.reduce((s, g) => s + g.partnerFee, 0));
   const couponDiscount = round2(groups.reduce((s, g) => s + g.couponDiscount, 0));
+  const firstGroup = groups[0];
   return {
     cartId: cart._id,
     couponCode: couponDiscount ? groups.find((g) => g.couponCode)?.couponCode || cart.couponCode : "",
@@ -196,6 +228,12 @@ export async function quoteCart(cart, buyerId, address = null, { strictCoupon = 
     subtotal,
     tax,
     deliveryFee,
+    platformFee,
+    partnerFee,
+    deliveryPartner: firstGroup?.deliveryPartner || null,
+    deliveryPartnerChoiceEnabled: Boolean(firstGroup?.deliveryPartnerChoiceEnabled),
+    deliveryPartners: firstGroup?.deliveryPartners || [],
+    platformFeeEnabled: Boolean(firstGroup?.platformFeeEnabled),
     couponDiscount,
     grandTotal: round2(groups.reduce((s, g) => s + g.total, 0)),
   };

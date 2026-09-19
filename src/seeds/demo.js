@@ -28,6 +28,7 @@ import { AuditLog } from "../modules/audit/auditLog.model.js";
 import { SYSTEM_ROLES } from "../config/constants.js";
 import { SALT } from "../modules/auth/service.js";
 import { IMPORTANT_EVENTS } from "../modules/analytics/events.catalog.js";
+import { ensureOpeningBalance } from "../modules/ledger/service.js";
 
 const CATEGORIES = [
   { slug: "staples", name: "Staples", icon: "🌾" },
@@ -139,8 +140,8 @@ const CATALOG = [
     price: 138,
     mrp: 168,
     stock: 500,
-    image: "https://images.unsplash.com/photo-1612929633738-8fe44f7ec841?auto=format&fit=crop&w=640&q=80",
-    gallery: ["https://images.unsplash.com/photo-1612929633738-8fe44f7ec841?auto=format&fit=crop&w=800&q=80"],
+    image: "https://images.unsplash.com/photo-1585032226651-759b368d7246?auto=format&fit=crop&w=640&q=80",
+    gallery: ["https://images.unsplash.com/photo-1585032226651-759b368d7246?auto=format&fit=crop&w=800&q=80"],
     description: "India's favourite instant noodles. Fast-moving SKU for kirana and bulk buyers.",
     features: ["Ready in 2 minutes", "Masala taste", "High velocity SKU"],
     ingredients: "Wheat flour, palm oil, spices.",
@@ -148,6 +149,8 @@ const CATALOG = [
     manufacturer: "Nestlé India.",
     deal: true,
     bestseller: true,
+    easyReturn: true,
+    deliveryModes: ["store_pickup", "delivery_partner"],
   },
   {
     id: "surf-excel",
@@ -301,11 +304,7 @@ const CATALOG = [
     manufacturer: "Mahashian Di Hatti Pvt. Ltd.",
     newLaunch: true,
   },
-].map((item) => ({
-  ...item,
-  image: "/products/product.png",
-  gallery: ["/products/product.png"],
-}));
+];
 
 function slugPack(pack) {
   return String(pack)
@@ -546,6 +545,9 @@ export async function seedDemoCatalog() {
     });
   }
   const buyer = buyers["buyer@acme.local"];
+  for (const user of Object.values(buyers)) {
+    await ensureOpeningBalance(user._id, tenant._id, user.email === "buyer@acme.local" ? 50000 : 25000);
+  }
 
   const categoryBySlug = {};
   for (const [i, cat] of CATEGORIES.entries()) {
@@ -629,6 +631,8 @@ export async function seedDemoCatalog() {
           taxClass: { name: gstRate === 5 ? "GST5" : "GST18", rate: gstRate },
           status: "published",
           scheduledAt: null,
+          easyReturn: item.easyReturn !== false,
+          deliveryModes: item.deliveryModes || ["store_pickup", "delivery_partner"],
           wholesale: { moq: 1, maxQty: 8000, packMultiple: 1, caseQty: 10, leadTimeDays: 2 },
         },
       },

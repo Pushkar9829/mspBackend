@@ -1,5 +1,6 @@
 import { Router } from "express";
 import multer from "multer";
+import { z } from "zod";
 import { authenticate, optionalAuth } from "../../middleware/authenticate.js";
 import { authorize } from "../../middleware/authorize.js";
 import { resolveTenant, requireTenant } from "../../middleware/tenantScope.js";
@@ -8,6 +9,7 @@ import { audit } from "../../middleware/audit.js";
 import { asyncHandler } from "../../utils/asyncHandler.js";
 import { MAX_UPLOAD_BYTES } from "../../config/constants.js";
 import * as service from "./service.js";
+import { subscribeRestock } from "./restock.js";
 import {
   createCategorySchema,
   updateCategorySchema,
@@ -19,6 +21,8 @@ import {
   updateVariantSchema,
   idParamSchema,
 } from "./validators.js";
+
+const objectId = z.string().regex(/^[a-f\d]{24}$/i);
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_BYTES } });
 
@@ -107,6 +111,14 @@ productRouter.get(
   optionalAuth,
   asyncHandler(async (req, res) => {
     res.json(await service.lookupBySlug(req.query.slug, req.query.pack, req));
+  })
+);
+productRouter.post(
+  "/:slug/notify-restock",
+  optionalAuth,
+  validate(z.object({ body: z.object({ email: z.string().email().optional(), variantId: objectId.optional() }) })),
+  asyncHandler(async (req, res) => {
+    res.status(201).json(await subscribeRestock(req, req.params.slug, req.body));
   })
 );
 productRouter.use(authenticate, resolveTenant);

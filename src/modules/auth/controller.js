@@ -1,5 +1,6 @@
 import { asyncHandler } from "../../utils/asyncHandler.js";
 import * as authService from "./service.js";
+import * as ledger from "../ledger/service.js";
 
 export const register = asyncHandler(async (req, res) => {
   const user = await authService.registerBuyer(req.body);
@@ -13,6 +14,9 @@ export const register = asyncHandler(async (req, res) => {
 
 export const login = asyncHandler(async (req, res) => {
   const result = await authService.login(req.body, res);
+  const ledgerDoc = await ledger.getLedgerForUser(result.user.id, result.user.tenantId);
+  result.user.ledgerBalance = ledgerDoc.balance;
+  result.user.ledgerUpdatedAt = ledgerDoc.updatedAt;
   res.json(result);
 });
 
@@ -27,7 +31,9 @@ export const logout = asyncHandler(async (req, res) => {
 });
 
 export const me = asyncHandler(async (req, res) => {
-  res.json(authService.toPublicUser(req.user, req.role));
+  const user = authService.toPublicUser(req.user, req.role);
+  const ledgerDoc = await ledger.getLedgerForUser(req.user._id, req.user.tenantId);
+  res.json({ ...user, ledgerBalance: ledgerDoc.balance, ledgerUpdatedAt: ledgerDoc.updatedAt, ledgerEntries: ledgerDoc.entries });
 });
 
 export const forgotPassword = asyncHandler(async (req, res) => {

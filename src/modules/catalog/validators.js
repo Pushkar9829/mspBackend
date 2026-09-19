@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { PRODUCT_STATUSES } from "../../config/constants.js";
+import { FULFILLMENT_MODES, PRODUCT_STATUSES } from "../../config/constants.js";
 
 const objectId = z.string().regex(/^[a-f\d]{24}$/i, "Invalid id");
 
@@ -54,6 +54,8 @@ export const createProductSchema = z.object({
     sellingPrice: z.number().min(0).optional(),
     listPrice: z.number().min(0).optional(),
     packSize: z.string().max(40).optional(),
+    easyReturn: z.boolean().optional(),
+    deliveryModes: z.array(z.enum(FULFILLMENT_MODES)).min(1).optional(),
     wholesale: z
       .object({
         moq: z.number().min(1).optional(),

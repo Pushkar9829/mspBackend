@@ -19,6 +19,7 @@ const TITLES = {
   CHAT_ESCALATED: "Chat escalated",
   GLOBAL_ANNOUNCEMENT: "Announcement",
   ACCOUNT_LOGIN: "New login",
+  RESTOCK_AVAILABLE: "Back in stock",
 };
 
 export async function persistAndPush({ userId, tenantId, event, title, body, data, audience }) {

@@ -22,8 +22,9 @@ import notificationRoutes from "../modules/notifications/routes.js";
 import { cmsPublicRouter, cmsAdminRouter } from "../modules/cms/routes.js";
 import reportRoutes from "../modules/reports/routes.js";
 import analyticsRoutes from "../modules/analytics/routes.js";
-import settingsRoutes from "../modules/settings/routes.js";
+import settingsRoutes, { settingsPublicRouter } from "../modules/settings/routes.js";
 import searchRoutes from "../modules/search/routes.js";
+import ledgerRoutes from "../modules/ledger/routes.js";
 
 const v1 = Router();
 
@@ -54,7 +55,9 @@ v1.use("/cms", cmsPublicRouter);
 v1.use("/cms/admin", cmsAdminRouter);
 v1.use("/reports", reportRoutes);
 v1.use("/analytics", analyticsRoutes);
+v1.use("/settings", settingsPublicRouter);
 v1.use("/settings", settingsRoutes);
 v1.use("/search", searchRoutes);
+v1.use("/ledger", ledgerRoutes);
 
 export default v1;
