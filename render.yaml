@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: mspbackend
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
