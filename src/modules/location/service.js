@@ -3,8 +3,34 @@ import { Warehouse } from "../inventory/warehouse.model.js";
 import { AppError } from "../../utils/AppError.js";
 import { env } from "../../config/env.js";
 
+export async function geocodeAddress({ postalCode, city, state, addressLine1 }) {
+  const formatted = [addressLine1, city, state, postalCode].filter(Boolean).join(", ");
+  if (env.mapsApiKey) {
+    try {
+      const url = new URL("https://maps.googleapis.com/maps/api/geocode/json");
+      url.searchParams.set("address", formatted || String(postalCode || city || ""));
+      url.searchParams.set("key", env.mapsApiKey);
+      const res = await fetch(url);
+      const data = await res.json();
+      const hit = data.results?.[0];
+      if (hit?.geometry?.location) {
+        return {
+          latitude: hit.geometry.location.lat,
+          longitude: hit.geometry.location.lng,
+          placeId: hit.place_id || "",
+          provider: "google",
+          formatted: hit.formatted_address || formatted,
+        };
+      }
+    } catch {
+      /* fall through to a local pin */
+    }
+  }
+  return geocodeStub({ postalCode, city, addressLine1: formatted || addressLine1 });
+}
+
 export async function geocodeStub({ postalCode, city, addressLine1 }) {
-  if (env.mapsProvider !== "stub" && env.mapsApiKey) {
+  if (env.mapsProvider !== "stub" && env.mapsApiKey && !addressLine1 && !postalCode && !city) {
     return { latitude: null, longitude: null, placeId: "", provider: env.mapsProvider };
   }
   const seed = Number(String(postalCode || "0").replace(/\D/g, "").slice(0, 6)) || 0;

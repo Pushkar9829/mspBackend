@@ -7,7 +7,13 @@ import { asyncHandler } from "../../utils/asyncHandler.js";
 import * as service from "./service.js";
 
 const router = Router();
-router.use(authenticate, resolveTenant, chatLimiter);
+router.use(authenticate, chatLimiter);
+router.use((req, res, next) => {
+  const perms = req.permissions || [];
+  const buyerOnly = !perms.includes("*") && !perms.includes("chat.assign");
+  if (buyerOnly) return next();
+  return resolveTenant(req, res, next);
+});
 
 router.get("/macros", authorize("chat.view"), asyncHandler(async (req, res) => {
   res.json(await service.listMacros(req));

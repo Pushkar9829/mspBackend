@@ -20,6 +20,7 @@ export const createTenantSchema = z.object({
     taxSettings: z.object({}).passthrough().optional(),
     orderRules: z.object({}).passthrough().optional(),
     deliveryZones: z.array(z.object({}).passthrough()).optional(),
+    pickupAddress: z.object({}).passthrough().optional(),
   }),
 });
 
@@ -33,6 +34,7 @@ export const updateTenantSchema = z.object({
     taxSettings: z.object({}).passthrough().optional(),
     orderRules: z.object({}).passthrough().optional(),
     deliveryZones: z.array(z.object({}).passthrough()).optional(),
+    pickupAddress: z.object({}).passthrough().optional(),
     notificationPreferences: z.object({}).passthrough().optional(),
   }),
 });
@@ -49,6 +51,7 @@ export const updateMineSchema = z.object({
     taxSettings: z.object({}).passthrough().optional(),
     orderRules: z.object({}).passthrough().optional(),
     deliveryZones: z.array(z.object({}).passthrough()).optional(),
+    pickupAddress: z.object({}).passthrough().optional(),
     notificationPreferences: z.object({}).passthrough().optional(),
   }),
 });

@@ -26,6 +26,20 @@ const tenantSchema = new mongoose.Schema(
       minOrderValue: { type: Number, default: 0 },
       allowBackorder: { type: Boolean, default: false },
     },
+    pickupAddress: {
+      label: { type: String, default: "Store pickup" },
+      contactName: { type: String, default: "" },
+      phone: { type: String, default: "" },
+      addressLine1: { type: String, default: "" },
+      city: { type: String, default: "" },
+      state: { type: String, default: "" },
+      postalCode: { type: String, default: "" },
+      country: { type: String, default: "IN" },
+      latitude: { type: Number, default: null },
+      longitude: { type: Number, default: null },
+      placeId: { type: String, default: "" },
+      formatted: { type: String, default: "" },
+    },
     deliveryZones: [
       {
         name: { type: String, required: true },

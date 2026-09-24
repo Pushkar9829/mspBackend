@@ -20,6 +20,7 @@ const productSchema = new mongoose.Schema(
       rate: { type: Number, default: 0 },
     },
     status: { type: String, enum: PRODUCT_STATUSES, default: "draft", index: true },
+    enabled: { type: Boolean, default: true, index: true },
     scheduledAt: { type: Date, default: null },
     easyReturn: { type: Boolean, default: false },
     deliveryModes: {

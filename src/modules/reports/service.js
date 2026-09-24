@@ -227,6 +227,10 @@ export async function tenantCustomers(tenantId, query = {}) {
       email: user?.email || "",
       phone: user?.phone || "",
       company: user?.profile?.company || "",
+      gstin: user?.profile?.gstin || "",
+      address: [user?.profile?.addressLine1, row.city || user?.profile?.location?.city, row.state || user?.profile?.location?.state, user?.profile?.location?.postalCode]
+        .filter(Boolean)
+        .join(", "),
       city: row.city || user?.profile?.location?.city || "",
       state: row.state || user?.profile?.location?.state || "",
       orders: row.orders,

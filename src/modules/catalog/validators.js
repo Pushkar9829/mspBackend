@@ -50,6 +50,8 @@ export const createProductSchema = z.object({
     brandId: objectId.optional(),
     taxClass: z.object({ name: z.string().optional(), rate: z.number().min(0).max(100).optional() }).optional(),
     status: z.enum(PRODUCT_STATUSES).optional(),
+    enabled: z.boolean().optional(),
+    availableQty: z.number().int().min(0).optional(),
     scheduledAt: z.coerce.date().optional(),
     sellingPrice: z.number().min(0).optional(),
     listPrice: z.number().min(0).optional(),

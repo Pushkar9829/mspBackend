@@ -18,6 +18,8 @@ const userSchema = new mongoose.Schema(
     lastLoginAt: { type: Date, default: null },
     profile: {
       company: { type: String, default: "" },
+      gstin: { type: String, default: "" },
+      addressLine1: { type: String, default: "" },
       preferredSizes: [{ type: String }],
       location: {
         city: String,

@@ -4,6 +4,7 @@ import { Product } from "./product.model.js";
 import { ProductVariant } from "./variant.model.js";
 import { Media } from "./media.model.js";
 import { Inventory } from "../inventory/inventory.model.js";
+import { Warehouse } from "../inventory/warehouse.model.js";
 import { Tenant } from "../tenants/tenant.model.js";
 import { AppError } from "../../utils/AppError.js";
 import { slugify } from "../../utils/slug.js";
@@ -87,7 +88,7 @@ export async function deleteBrand(req, id) {
 
 export async function listProducts(req, { buyer = false } = {}) {
   const { page, limit, skip } = paginate(req.query);
-  const filter = buyer ? { status: "published" } : tenantFilter(req);
+  const filter = buyer ? { status: "published", enabled: { $ne: false } } : tenantFilter(req);
   if (buyer && req.query.tenantId) filter.tenantId = req.query.tenantId;
   if (req.query.categoryId) filter.categoryId = req.query.categoryId;
   if (req.query.brandId) filter.brandId = req.query.brandId;
@@ -166,7 +167,8 @@ export async function getProduct(req, id, { buyer = false } = {}) {
 
 export async function createProduct(req, body) {
   if (!req.tenantId) throw new AppError(400, "Tenant context required", "TENANT_REQUIRED");
-  const { variant, initialStock, sellingPrice, listPrice, packSize, ...rest } = body;
+  const { variant, initialStock, sellingPrice, listPrice, packSize, availableQty, ...rest } = body;
+  void availableQty;
   const product = await Product.create({
     ...rest,
     sku: String(rest.sku || "").toUpperCase(),
@@ -200,8 +202,28 @@ export async function createProduct(req, body) {
   return product;
 }
 
+async function setProductAvailable(product, qty) {
+  const variants = await ProductVariant.find({ productId: product._id }).sort({ createdAt: 1 });
+  if (!variants.length) return;
+  let stock = await Inventory.findOne({ variantId: variants[0]._id });
+  if (!stock) {
+    const warehouse = await Warehouse.findOne({ tenantId: product.tenantId, status: "active" });
+    if (!warehouse) throw new AppError(400, "Add a warehouse before setting available stock", "WAREHOUSE_REQUIRED");
+    await Inventory.create({
+      tenantId: product.tenantId,
+      warehouseId: warehouse._id,
+      variantId: variants[0]._id,
+      sku: variants[0].sku,
+      available: qty,
+    });
+    return;
+  }
+  stock.available = qty;
+  await stock.save();
+}
+
 export async function updateProduct(req, id, body) {
-  const { variant, initialStock, ...rest } = body;
+  const { variant, initialStock, sellingPrice, listPrice, availableQty, ...rest } = body;
   if (rest.sku) rest.sku = String(rest.sku).toUpperCase();
   const product = await Product.findOneAndUpdate({ _id: id, ...tenantFilter(req) }, rest, {
     new: true,
@@ -210,6 +232,13 @@ export async function updateProduct(req, id, body) {
   if (!product) throw new AppError(404, "Product not found", "NOT_FOUND");
   void variant;
   void initialStock;
+  if (sellingPrice != null || listPrice != null) {
+    const patch = {};
+    if (sellingPrice != null) patch.sellingPrice = Number(sellingPrice);
+    if (listPrice != null) patch.listPrice = Number(listPrice);
+    await ProductVariant.updateMany({ productId: product._id }, patch);
+  }
+  if (availableQty != null) await setProductAvailable(product, Number(availableQty));
   return product;
 }
 
@@ -274,7 +303,7 @@ function withCatalogOffers(product, variants, offers, buyerId) {
 
 export async function lookupBySlug(slug, pack, req) {
   if (!slug) throw new AppError(400, "slug is required", "VALIDATION_ERROR");
-  const product = await Product.findOne({ sku: String(slug).toUpperCase(), status: "published" })
+  const product = await Product.findOne({ sku: String(slug).toUpperCase(), status: "published", enabled: { $ne: false } })
     .populate("categoryId", "name slug")
     .populate("brandId", "name slug");
   if (!product) throw new AppError(404, "Product not found", "NOT_FOUND");
@@ -311,6 +340,7 @@ export async function lookupBySlug(slug, pack, req) {
       }) || variant;
   }
   const available = withStock.reduce((sum, row) => sum + (Number(row.available) || 0), 0);
+  const seller = await Tenant.findById(product.tenantId).select("name pickupAddress");
   return {
     slug: String(product.sku || "").toLowerCase(),
     product: {
@@ -323,12 +353,13 @@ export async function lookupBySlug(slug, pack, req) {
     variants: withStock,
     offers: liveOffers,
     available,
+    pickupAddress: seller?.pickupAddress || null,
   };
 }
 
 export async function searchCatalog(req) {
   const { page, limit, skip } = paginate(req.query);
-  const filter = { status: "published" };
+  const filter = { status: "published", enabled: { $ne: false } };
   if (req.query.tenantId) filter.tenantId = req.query.tenantId;
   if (req.query.categoryId) filter.categoryId = req.query.categoryId;
   if (req.query.brandId) filter.brandId = req.query.brandId;

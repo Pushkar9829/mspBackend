@@ -7,16 +7,28 @@ import { asyncHandler } from "../../utils/asyncHandler.js";
 import * as service from "./service.js";
 import { getCommerceSettings, publicCommerce } from "./commerce.js";
 
+function liveFestival(value) {
+  if (!value || !value.enabled || !String(value.message || "").trim()) return null;
+  const now = Date.now();
+  if (value.startsAt && now < new Date(value.startsAt).getTime()) return null;
+  if (value.endsAt && now > new Date(value.endsAt).getTime()) return null;
+  return {
+    title: value.title || "Festival wishes",
+    message: String(value.message),
+  };
+}
+
 export const settingsPublicRouter = Router();
 settingsPublicRouter.get(
   "/public",
   asyncHandler(async (_req, res) => {
-    const [name, slogan, commerce] = await Promise.all([
+    const [name, slogan, commerce, festival] = await Promise.all([
       service.getSetting("platform", null, "platform.name", "MSP Wholesale Marketplace"),
       service.getSetting("platform", null, "platform.slogan", "भाव भी भरोसा भी"),
       getCommerceSettings(),
+      service.getSetting("platform", null, "platform.festival", null),
     ]);
-    res.json({ name, slogan, ...publicCommerce(commerce) });
+    res.json({ name, slogan, festival: liveFestival(festival), ...publicCommerce(commerce) });
   })
 );
 
@@ -25,6 +37,9 @@ router.use(authenticate, resolveTenant, authorizeAny("settings.view", "settings.
 
 router.get("/", asyncHandler(async (req, res) => {
   res.json(await service.listSettings(req));
+}));
+router.get("/commerce", asyncHandler(async (req, res) => {
+  res.json(await getCommerceSettings(req.tenantId || null));
 }));
 router.put(
   "/:key",

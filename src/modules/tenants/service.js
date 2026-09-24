@@ -8,6 +8,7 @@ import { paginate, paginated } from "../../utils/pagination.js";
 import { SYSTEM_ROLES } from "../../config/constants.js";
 import { SALT } from "../auth/service.js";
 import { emitDomain } from "../../utils/events.js";
+import { geocodeAddress } from "../location/service.js";
 
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -108,8 +109,19 @@ export async function updateMyTenant(req, body) {
     taxSettings: body.taxSettings,
     orderRules: body.orderRules,
     deliveryZones: body.deliveryZones,
+    pickupAddress: body.pickupAddress,
     notificationPreferences: body.notificationPreferences,
   };
+  if (body.pickupAddress) {
+    const geo = await geocodeAddress(body.pickupAddress);
+    allowed.pickupAddress = {
+      ...body.pickupAddress,
+      latitude: geo.latitude,
+      longitude: geo.longitude,
+      placeId: geo.placeId || "",
+      formatted: geo.formatted || "",
+    };
+  }
   const patch = Object.fromEntries(Object.entries(allowed).filter(([, v]) => v !== undefined));
   return updateTenant(tenantId, patch);
 }

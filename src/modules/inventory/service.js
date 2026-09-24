@@ -110,6 +110,7 @@ export async function adjustStock(req, { warehouseId, variantId, reason, qty, no
     if (next < 0) throw new AppError(400, "Incoming cannot be negative", "INSUFFICIENT_STOCK");
     stock.incoming = next;
   } else if (reason === "damage") {
+    if (qty <= 0) throw new AppError(400, "Damage quantity must be a positive number", "VALIDATION_ERROR");
     if (stock.available < qty) throw new AppError(400, "Insufficient available stock", "INSUFFICIENT_STOCK");
     stock.available -= qty;
     stock.damaged += qty;

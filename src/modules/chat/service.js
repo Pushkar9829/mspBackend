@@ -1,6 +1,7 @@
 import { Conversation } from "./conversation.model.js";
 import { Message } from "./message.model.js";
 import { User } from "../users/user.model.js";
+import { Order } from "../orders/order.model.js";
 import { AppError } from "../../utils/AppError.js";
 import { tenantFilter } from "../../middleware/tenantScope.js";
 import { paginate, paginated } from "../../utils/pagination.js";
@@ -30,8 +31,18 @@ export async function saveMacro(req, { title, body }) {
 }
 
 export async function startConversation(req, body) {
-  const tenantId = body.tenantId || req.tenantId || req.user.tenantId;
-  if (!tenantId && !req.isPlatformAdmin) {
+  let tenantId = body.tenantId || req.tenantId || req.user.tenantId || null;
+  let orderId = body.orderId || null;
+  if (orderId) {
+    const order = await Order.findOne({
+      _id: orderId,
+      ...(isBuyer(req) ? { buyerId: req.user._id } : {}),
+    });
+    if (!order) throw new AppError(404, "Order not found", "NOT_FOUND");
+    tenantId = order.tenantId;
+    orderId = order._id;
+  }
+  if (!tenantId && !req.isPlatformAdmin && !isBuyer(req)) {
     throw new AppError(400, "tenantId required", "VALIDATION_ERROR");
   }
   const convo = await Conversation.create({
@@ -40,7 +51,7 @@ export async function startConversation(req, body) {
     type: CONVERSATION_TYPES.includes(body.type) ? body.type : "general_support",
     status: "unassigned",
     subject: body.subject || "",
-    orderId: body.orderId || null,
+    orderId,
     productId: body.productId || null,
   });
   if (body.message) {

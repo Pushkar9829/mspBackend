@@ -5,6 +5,7 @@ import { AppError } from "../../utils/AppError.js";
 import { paginate, paginated } from "../../utils/pagination.js";
 import { tenantFilter } from "../../middleware/tenantScope.js";
 import { toPublicUser, SALT } from "../auth/service.js";
+import { Address } from "../location/address.model.js";
 import { SYSTEM_ROLES } from "../../config/constants.js";
 
 function escapeRegex(value) {
@@ -59,8 +60,35 @@ export async function listUsers(req) {
     User.find(filter).populate("roleId").populate("tenantId", "name slug").sort({ createdAt: -1 }).skip(skip).limit(limit),
     User.countDocuments(filter),
   ]);
+  const addresses = rows.length
+    ? await Address.find({ userId: { $in: rows.map((u) => u._id) } }).sort({ isDefault: -1, updatedAt: -1 })
+    : [];
+  const addressByUser = new Map();
+  for (const address of addresses) {
+    const key = String(address.userId);
+    if (!addressByUser.has(key)) addressByUser.set(key, address);
+  }
   return paginated(
-    rows.map((u) => toPublicUser(u, u.roleId)),
+    rows.map((u) => {
+      const pub = toPublicUser(u, u.roleId);
+      const saved = addressByUser.get(String(u._id));
+      if (!saved) return pub;
+      const profile = pub.profile || {};
+      return {
+        ...pub,
+        phone: pub.phone || saved.phone || "",
+        profile: {
+          ...profile,
+          addressLine1: profile.addressLine1 || saved.addressLine1,
+          location: {
+            city: profile.location?.city || saved.city,
+            state: profile.location?.state || saved.state,
+            postalCode: profile.location?.postalCode || saved.postalCode,
+            country: profile.location?.country || saved.country || "IN",
+          },
+        },
+      };
+    }),
     total,
     { page, limit }
   );

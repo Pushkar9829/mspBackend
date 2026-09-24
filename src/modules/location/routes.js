@@ -25,12 +25,20 @@ const serviceabilitySchema = z.object({
 
 const locationRouter = Router();
 
+locationRouter.post(
+  "/geocode",
+  authenticate,
+  asyncHandler(async (req, res) => {
+    res.json(await service.geocodeAddress(req.body || {}));
+  })
+);
+
 locationRouter.get(
   "/suggest",
   optionalAuth,
   validate(suggestSchema),
   asyncHandler(async (req, res) => {
-    const geo = await service.geocodeStub({
+    const geo = await service.geocodeAddress({
       postalCode: req.query.postalCode,
       city: req.query.city || req.query.q,
     });
