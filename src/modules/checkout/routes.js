@@ -36,7 +36,7 @@ cartRouter.get("/coupons", asyncHandler(async (req, res) => {
 
 cartRouter.post(
   "/items",
-  validate(z.object({ body: z.object({ variantId: objectId, qty: z.number().int().positive(), fulfillmentMode: z.enum(["store_pickup", "delivery_partner"]).optional() }) })),
+  validate(z.object({ body: z.object({ variantId: objectId, qty: z.number().int().positive(), fulfillmentMode: z.enum(["store_pickup", "delivery_partner"]).optional(), bulk: z.boolean().optional() }) })),
   asyncHandler(async (req, res) => {
     const { userId, guestKey } = cartIdentity(req);
     res.json(await cartService.addItem(userId, guestKey, req.body));
@@ -99,10 +99,11 @@ checkoutRouter.post(
     z.object({
       body: z.object({
         addressId: objectId,
-        paymentMethod: PAYMENT.optional(),
-        poNumber: z.string().optional(),
+        paymentMethod: PAYMENT,
+        poNumber: z.string().max(80).optional(),
         buyerNotes: z.string().max(1000).optional(),
         deliveryPartnerId: z.string().max(80).optional(),
+        expectedGrandTotal: z.number().nonnegative().optional(),
       }),
     })
   ),
@@ -115,6 +116,7 @@ checkoutRouter.post(
       poNumber: req.body.poNumber,
       buyerNotes: req.body.buyerNotes,
       deliveryPartnerId: req.body.deliveryPartnerId,
+      expectedGrandTotal: req.body.expectedGrandTotal,
       idempotencyKey,
     });
     res.status(result.idempotent ? 200 : 201).json(result);

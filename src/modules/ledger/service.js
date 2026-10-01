@@ -14,11 +14,18 @@ export async function getOrCreateLedger(userId, tenantId = null) {
 export async function applyEntry({ userId, tenantId, type, amount, note, orderId }) {
   const value = round2(Number(amount) || 0);
   if (value <= 0) return getOrCreateLedger(userId, tenantId);
-  const ledger = await getOrCreateLedger(userId, tenantId);
-  const next = round2(type === "debit" ? ledger.balance - value : ledger.balance + value);
-  ledger.balance = next;
-  if (tenantId && !ledger.tenantId) ledger.tenantId = tenantId;
-  await ledger.save();
+  await getOrCreateLedger(userId, tenantId);
+  const ledger = await CustomerLedger.findOneAndUpdate(
+    { userId },
+    { $inc: { balance: type === "debit" ? -value : value } },
+    { new: true }
+  );
+  ledger.balance = round2(ledger.balance);
+  const next = ledger.balance;
+  if (tenantId && !ledger.tenantId) {
+    ledger.tenantId = tenantId;
+    await ledger.save();
+  }
   await LedgerEntry.create({
     userId,
     tenantId: tenantId || ledger.tenantId || null,
@@ -56,8 +63,11 @@ export async function ensureOpeningBalance(userId, tenantId, amount = 50000) {
   return ledger;
 }
 
+export const LEDGER_PAYMENT_METHODS = ["credit_terms", "purchase_order"];
+
 export async function debitOrder(order) {
   if (!order?.buyerId || !order.total) return null;
+  if (!LEDGER_PAYMENT_METHODS.includes(order.paymentMethod)) return null;
   const ledger = await applyEntry({
     userId: order.buyerId,
     tenantId: order.tenantId,

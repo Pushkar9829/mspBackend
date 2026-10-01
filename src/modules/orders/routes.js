@@ -18,6 +18,9 @@ router.use((req, res, next) => {
 router.get("/", authorize("orders.view"), asyncHandler(async (req, res) => {
   res.json(await service.listOrders(req));
 }));
+router.get("/:id/invoice", authorize("orders.view"), asyncHandler(async (req, res) => {
+  res.json(await service.getInvoice(req, req.params.id));
+}));
 router.get("/:id", authorize("orders.view"), asyncHandler(async (req, res) => {
   res.json(await service.getOrder(req, req.params.id));
 }));

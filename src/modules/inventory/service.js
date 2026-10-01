@@ -314,6 +314,15 @@ export async function commitReservation({ tenantId, warehouseId, variantId, qty,
   return stock;
 }
 
+/** Undo a commit back into the reservation (used to roll back a failed confirm without transactions). */
+export async function uncommitReservation({ tenantId, warehouseId, variantId, qty }) {
+  return Inventory.findOneAndUpdate(
+    { tenantId, warehouseId, variantId, committed: { $gte: qty } },
+    { $inc: { committed: -qty, reserved: qty } },
+    { new: true }
+  );
+}
+
 export async function restoreCommitted({ tenantId, warehouseId, variantId, qty, reference, session }) {
   const opts = { new: true };
   if (session) opts.session = session;
@@ -346,14 +355,20 @@ export async function availableForVariant(variantId) {
   return rows[0] || { available: 0, reserved: 0 };
 }
 
-export async function pickWarehouseForVariant(tenantId, variantId, preferredPostal) {
+/**
+ * Pick one warehouse that can ship `qty` on its own (checkout reserves from a single warehouse).
+ * Prefers a postal-code match among warehouses with enough stock, then the fullest one.
+ */
+export async function pickWarehouseForVariant(tenantId, variantId, preferredPostal, qty = 1) {
   const stocks = await Inventory.find({ tenantId, variantId, available: { $gt: 0 } }).populate("warehouseId");
   if (!stocks.length) return null;
+  const sorted = stocks.sort((a, b) => b.available - a.available);
+  const enough = sorted.filter((s) => s.available >= qty);
   if (preferredPostal) {
-    const match = stocks.find((s) => s.warehouseId?.postalCode === preferredPostal);
+    const match = enough.find((s) => s.warehouseId?.postalCode === preferredPostal);
     if (match) return match;
   }
-  return stocks.sort((a, b) => b.available - a.available)[0];
+  return enough[0] || sorted[0];
 }
 
 export async function listTransactions(req) {

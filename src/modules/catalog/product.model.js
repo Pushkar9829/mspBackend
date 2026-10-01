@@ -19,6 +19,7 @@ const productSchema = new mongoose.Schema(
       name: { type: String, default: "GST0" },
       rate: { type: Number, default: 0 },
     },
+    hsn: { type: String, default: "", trim: true },
     status: { type: String, enum: PRODUCT_STATUSES, default: "draft", index: true },
     enabled: { type: Boolean, default: true, index: true },
     scheduledAt: { type: Date, default: null },
@@ -28,6 +29,8 @@ const productSchema = new mongoose.Schema(
       default: () => ["delivery_partner"],
     },
     wholesale: {
+      /** When true, product appears on /bulk and wholesale rules (MOQ/max/slabs) apply in checkout. */
+      bulkEligible: { type: Boolean, default: false, index: true },
       moq: { type: Number, default: 1 },
       maxQty: { type: Number, default: null },
       packMultiple: { type: Number, default: 1 },

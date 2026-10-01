@@ -53,9 +53,11 @@ export function pickPartner(partners, id, choiceEnabled = true) {
   return list.find((partner) => partner.isDefault) || list[0];
 }
 
-export function computePlatformFee(commerce, subtotal) {
+/** `includeFlat` is false for every seller after the first so the flat fee is charged once per checkout. */
+export function computePlatformFee(commerce, subtotal, { includeFlat = true } = {}) {
   if (!commerce?.feeEnabled) return 0;
-  return round2((commerce.feeAmount || 0) + Number(subtotal || 0) * ((commerce.feePercent || 0) / 100));
+  const flat = includeFlat ? commerce.feeAmount || 0 : 0;
+  return round2(flat + Number(subtotal || 0) * ((commerce.feePercent || 0) / 100));
 }
 
 export function publicCommerce(commerce) {

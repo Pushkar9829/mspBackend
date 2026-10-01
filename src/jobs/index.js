@@ -54,9 +54,18 @@ export function startJobs() {
   cron.schedule("* * * * *", async () => {
     try {
       const stale = new Date(Date.now() - CART_RESERVATION_MINUTES * 60 * 1000);
-      const orders = await Order.find({ status: "pending", createdAt: { $lt: stale } }).limit(25);
+      const orders = await Order.find({
+        status: "pending",
+        paymentMethod: { $in: ["upi", "card", "netbanking"] },
+        paymentStatus: { $in: ["unpaid", "pending", "failed"] },
+        createdAt: { $lt: stale },
+      }).limit(25);
       for (const order of orders) {
-        await cancelOrder(order, null, "Reservation timeout", { timeout: true });
+        try {
+          await cancelOrder(order, null, "Reservation timeout", { timeout: true });
+        } catch (err) {
+          console.error("reservation-timeout cancel", order.orderNumber, err.message);
+        }
       }
     } catch (err) {
       console.error("reservation-timeout job", err.message);

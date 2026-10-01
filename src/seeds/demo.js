@@ -29,6 +29,27 @@ import { SYSTEM_ROLES } from "../config/constants.js";
 import { SALT } from "../modules/auth/service.js";
 import { IMPORTANT_EVENTS } from "../modules/analytics/events.catalog.js";
 import { ensureOpeningBalance } from "../modules/ledger/service.js";
+import { allocateCoupon, splitInclusive, round2 } from "../modules/pricing/engine.js";
+
+/** Only these SKUs are sold in bulk; everything else is a normal one-at-a-time product. */
+const BULK_IDS = new Set([
+  "tata-tea-premium",
+  "fortune-sunflower-oil",
+  "aashirvaad-atta",
+  "maggi-masala",
+  "surf-excel",
+  "parle-g",
+]);
+const BULK_RULES = { moq: 10, packMultiple: 5, maxQty: 1000 };
+
+const HSN_BY_CATEGORY = {
+  beverages: "2202",
+  staples: "1006",
+  snacks: "1905",
+  "home-care": "3402",
+  dairy: "0401",
+  "personal-care": "3305",
+};
 
 const CATEGORIES = [
   { slug: "staples", name: "Staples", icon: "🌾" },
@@ -409,6 +430,19 @@ export async function seedDemoCatalog() {
         },
         taxSettings: { defaultTaxRate: 18, currency: "INR" },
         orderRules: { minOrderValue: 500, allowBackorder: false },
+        pickupAddress: {
+          label: "Acme Okhla warehouse",
+          contactName: "Acme Dispatch",
+          phone: "01140001234",
+          addressLine1: "Plot 12, Okhla Industrial Area Phase 2",
+          city: "New Delhi",
+          state: "DL",
+          postalCode: "110020",
+          country: "IN",
+          latitude: 28.53,
+          longitude: 77.27,
+          formatted: "Plot 12, Okhla Industrial Area Phase 2, New Delhi, DL 110020",
+        },
         deliveryZones: [
           {
             name: "Delhi NCR",
@@ -477,6 +511,7 @@ export async function seedDemoCatalog() {
       name: "Demo Buyer",
       phone: "9999999999",
       company: "Retail Mart",
+      gstin: "07AAFCR4321K1Z2",
       city: "Delhi",
       state: "DL",
       postalCode: "110001",
@@ -499,6 +534,7 @@ export async function seedDemoCatalog() {
       name: "Meera Shah",
       phone: "9811100002",
       company: "City Foods",
+      gstin: "27AACCC5678L1Z9",
       city: "Mumbai",
       state: "MH",
       postalCode: "400001",
@@ -539,6 +575,7 @@ export async function seedDemoCatalog() {
       roleId: buyerRole._id,
       profile: {
         company: spec.company,
+        gstin: spec.gstin || "",
         preferredSizes: ["outer", "case"],
         location: { city: spec.city, state: spec.state, postalCode: spec.postalCode, country: "IN" },
       },
@@ -629,11 +666,14 @@ export async function seedDemoCatalog() {
           categoryId: categoryBySlug[item.category]._id,
           brandId: brandBySlug[item.brand]._id,
           taxClass: { name: gstRate === 5 ? "GST5" : "GST18", rate: gstRate },
+          hsn: HSN_BY_CATEGORY[item.category] || "2106",
           status: "published",
           scheduledAt: null,
           easyReturn: item.easyReturn !== false,
           deliveryModes: item.deliveryModes || ["store_pickup", "delivery_partner"],
-          wholesale: { moq: 1, maxQty: 8000, packMultiple: 1, caseQty: 10, leadTimeDays: 2 },
+          wholesale: BULK_IDS.has(item.id)
+            ? { bulkEligible: true, ...BULK_RULES, caseQty: 10, leadTimeDays: 2 }
+            : { bulkEligible: false, moq: 1, maxQty: null, packMultiple: 1, caseQty: 1, leadTimeDays: 1 },
         },
       },
       { upsert: true, new: true }
@@ -683,11 +723,13 @@ export async function seedDemoCatalog() {
             },
             listPrice: list,
             sellingPrice: selling,
-            tierPrices: [
-              { minQty: 1, maxQty: 49, unitPrice: selling },
-              { minQty: 50, maxQty: 199, unitPrice: Math.round(selling * 0.92) },
-              { minQty: 200, maxQty: null, unitPrice: Math.round(selling * 0.85) },
-            ],
+            tierPrices: BULK_IDS.has(item.id)
+              ? [
+                  { minQty: BULK_RULES.moq, maxQty: 49, unitPrice: selling },
+                  { minQty: 50, maxQty: 199, unitPrice: Math.round(selling * 0.92) },
+                  { minQty: 200, maxQty: null, unitPrice: Math.round(selling * 0.85) },
+                ]
+              : [],
             status: "active",
           },
         },
@@ -967,22 +1009,25 @@ export async function seedDemoCatalog() {
 
   function line(d, qty, warehouseId) {
     const taxRate = d.gstRate;
-    const lineSubtotal = d.selling * qty;
-    const tax = Math.round(lineSubtotal * (taxRate / 100));
+    const lineSubtotal = round2(d.selling * qty);
+    const { taxableValue, tax } = splitInclusive(lineSubtotal, taxRate);
     return {
       tenantId: tenant._id,
       productId: d.product._id,
       variantId: d.variant._id,
       sku: d.variant.sku,
       name: d.product.name,
+      hsn: d.product.hsn || "",
       attributes: d.variant.attributes,
       qty,
       listPrice: d.variant.listPrice,
       unitPrice: d.selling,
       lineSubtotal,
+      couponShare: 0,
       taxRate,
+      taxableValue,
       tax,
-      lineTotal: lineSubtotal + tax,
+      lineTotal: lineSubtotal,
       warehouseId,
     };
   }
@@ -1002,11 +1047,13 @@ export async function seedDemoCatalog() {
     const pick = defaultVariants.slice(idx, idx + 3);
     const qty = Math.max(10, Math.round(def.amountHint / (pick[0]?.selling || 200)));
     const items = pick.map((d, i) => line(d, Math.max(10, Math.round(qty / (i + 1))), delhi._id));
-    const subtotal = items.reduce((s, it) => s + it.lineSubtotal, 0);
-    const tax = items.reduce((s, it) => s + it.tax, 0);
+    const subtotal = round2(items.reduce((s, it) => s + it.lineSubtotal, 0));
     const couponDiscount = def.coupon ? Math.round(subtotal * 0.1) : 0;
+    allocateCoupon(items, couponDiscount, null);
+    const tax = round2(items.reduce((s, it) => s + it.tax, 0));
+    const taxableValue = round2(items.reduce((s, it) => s + it.taxableValue, 0));
     const deliveryFee = addr.city === "Mumbai" ? 80 : 0;
-    const total = subtotal + tax + deliveryFee - couponDiscount;
+    const total = round2(subtotal - couponDiscount + deliveryFee);
     const createdAt = new Date(Date.now() - def.daysAgo * 86400000);
     const history = [{ status: "pending", at: createdAt, actorId: user._id, note: "Placed via seed" }];
     if (def.status !== "pending") history.push({ status: def.status, at: new Date(createdAt.getTime() + 3600000), actorId: tenantAdmin._id, note: "Status update" });
@@ -1031,9 +1078,27 @@ export async function seedDemoCatalog() {
           couponCode: def.coupon || "",
           couponDiscount,
           subtotal,
+          taxableValue,
           tax,
+          taxInclusive: true,
           deliveryFee,
           total,
+          buyerSnapshot: {
+            name: user.name,
+            company: user.profile?.company || "",
+            email: user.email,
+            phone: user.phone || addr.phone || "",
+            gstin: user.profile?.gstin || "",
+          },
+          sellerSnapshot: {
+            name: tenant.name,
+            legalName: tenant.businessProfile?.legalName || tenant.name,
+            gstin: tenant.businessProfile?.gstin || "",
+            state: tenant.pickupAddress?.state || "",
+            address: tenant.pickupAddress?.formatted || "",
+            email: tenant.businessProfile?.email || "",
+            phone: tenant.businessProfile?.phone || "",
+          },
           paymentMethod: def.status === "cancelled" ? "cod" : "purchase_order",
           paymentStatus: def.status === "delivered" ? "paid" : def.status === "cancelled" ? "failed" : "pending",
           poNumber: `PO-${def.number}`,

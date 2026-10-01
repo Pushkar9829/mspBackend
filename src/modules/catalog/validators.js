@@ -49,6 +49,7 @@ export const createProductSchema = z.object({
     categoryId: objectId.optional(),
     brandId: objectId.optional(),
     taxClass: z.object({ name: z.string().optional(), rate: z.number().min(0).max(100).optional() }).optional(),
+    hsn: z.string().max(12).optional(),
     status: z.enum(PRODUCT_STATUSES).optional(),
     enabled: z.boolean().optional(),
     availableQty: z.number().int().min(0).optional(),
@@ -60,12 +61,22 @@ export const createProductSchema = z.object({
     deliveryModes: z.array(z.enum(FULFILLMENT_MODES)).min(1).optional(),
     wholesale: z
       .object({
+        bulkEligible: z.boolean().optional(),
         moq: z.number().min(1).optional(),
         maxQty: z.number().nullable().optional(),
         packMultiple: z.number().min(1).optional(),
         caseQty: z.number().min(1).optional(),
         leadTimeDays: z.number().min(0).optional(),
       })
+      .optional(),
+    tierPrices: z
+      .array(
+        z.object({
+          minQty: z.number().min(1),
+          maxQty: z.number().nullable().optional(),
+          unitPrice: z.number().min(0),
+        })
+      )
       .optional(),
     variant: z
       .object({
@@ -99,6 +110,47 @@ export const createProductSchema = z.object({
 export const updateProductSchema = z.object({
   params: z.object({ id: objectId }),
   body: createProductSchema.shape.body.partial(),
+});
+
+export const bulkUploadProductsSchema = z.object({
+  body: z.object({
+    items: z
+      .array(
+        z.object({
+          name: z.string().min(1).max(200),
+          sku: z.string().min(1).max(80),
+          sellingPrice: z.number().min(0),
+          listPrice: z.number().min(0).optional(),
+          categoryId: objectId.optional(),
+          brandId: objectId.optional(),
+          status: z.enum(PRODUCT_STATUSES).optional(),
+          publish: z.boolean().optional(),
+          wholesale: z
+            .object({
+              bulkEligible: z.boolean().optional(),
+              moq: z.number().min(1).optional(),
+              maxQty: z.number().nullable().optional(),
+              packMultiple: z.number().min(1).optional(),
+              caseQty: z.number().min(1).optional(),
+              leadTimeDays: z.number().min(0).optional(),
+            })
+            .optional(),
+          tierPrices: z
+            .array(
+              z.object({
+                minQty: z.number().min(1),
+                maxQty: z.number().nullable().optional(),
+                unitPrice: z.number().min(0),
+              })
+            )
+            .optional(),
+          availableQty: z.number().int().min(0).optional(),
+          warehouseId: objectId.optional(),
+        })
+      )
+      .min(1)
+      .max(500),
+  }),
 });
 
 export const createVariantSchema = z.object({

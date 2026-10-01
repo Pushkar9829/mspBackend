@@ -94,6 +94,11 @@ export async function listProducts(req, { buyer = false } = {}) {
   if (req.query.brandId) filter.brandId = req.query.brandId;
   if (req.query.status && !buyer) filter.status = req.query.status;
   if (req.query.tag) filter.tags = req.query.tag;
+  if (req.query.bulkEligible === "true" || req.query.bulkEligible === "1") {
+    filter["wholesale.bulkEligible"] = true;
+  } else if (req.query.bulkEligible === "false" || req.query.bulkEligible === "0") {
+    filter["wholesale.bulkEligible"] = { $ne: true };
+  }
   if (req.query.q) {
     const rx = new RegExp(String(req.query.q).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
     filter.$or = [{ name: rx }, { sku: rx }, { tags: rx }, { description: rx }];
@@ -140,15 +145,17 @@ export async function listProducts(req, { buyer = false } = {}) {
     const available = vs.reduce((sum, v) => sum + (stockByVariant.get(String(v._id))?.available || 0), 0);
     const reserved = vs.reduce((sum, v) => sum + (stockByVariant.get(String(v._id))?.reserved || 0), 0);
     const prices = vs.map((v) => v.sellingPrice).filter((n) => n != null);
+    const primary = vs[0] || null;
     return {
       ...p.toObject(),
       variantsCount: vs.length,
       available,
       reserved,
       sellingPrice: prices.length ? Math.min(...prices) : null,
-      listPrice: vs[0]?.listPrice ?? null,
-      primaryVariantId: vs[0]?._id || null,
-      primarySku: vs[0]?.sku || p.sku,
+      listPrice: primary?.listPrice ?? null,
+      primaryVariantId: primary?._id || null,
+      primarySku: primary?.sku || p.sku,
+      tierPrices: primary?.tierPrices || [],
     };
   });
 
@@ -167,7 +174,7 @@ export async function getProduct(req, id, { buyer = false } = {}) {
 
 export async function createProduct(req, body) {
   if (!req.tenantId) throw new AppError(400, "Tenant context required", "TENANT_REQUIRED");
-  const { variant, initialStock, sellingPrice, listPrice, packSize, availableQty, ...rest } = body;
+  const { variant, initialStock, sellingPrice, listPrice, packSize, availableQty, tierPrices, ...rest } = body;
   void availableQty;
   const product = await Product.create({
     ...rest,
@@ -181,6 +188,9 @@ export async function createProduct(req, body) {
     sellingPrice: Number(sellingPrice ?? listPrice ?? 0),
     attributes: { packSize: packSize || "1 pc" },
   };
+  if (tierPrices?.length && !variantBody.tierPrices?.length) {
+    variantBody.tierPrices = tierPrices;
+  }
 
   const created = await ProductVariant.create({
     ...variantBody,
@@ -223,7 +233,7 @@ async function setProductAvailable(product, qty) {
 }
 
 export async function updateProduct(req, id, body) {
-  const { variant, initialStock, sellingPrice, listPrice, availableQty, ...rest } = body;
+  const { variant, initialStock, sellingPrice, listPrice, availableQty, tierPrices, ...rest } = body;
   if (rest.sku) rest.sku = String(rest.sku).toUpperCase();
   const product = await Product.findOneAndUpdate({ _id: id, ...tenantFilter(req) }, rest, {
     new: true,
@@ -232,7 +242,19 @@ export async function updateProduct(req, id, body) {
   if (!product) throw new AppError(404, "Product not found", "NOT_FOUND");
   void variant;
   void initialStock;
-  if (sellingPrice != null || listPrice != null) {
+  const primary = await ProductVariant.findOne({ productId: product._id }).sort({ createdAt: 1 });
+  if (primary && (sellingPrice != null || listPrice != null || tierPrices)) {
+    if (sellingPrice != null) primary.sellingPrice = Number(sellingPrice);
+    if (listPrice != null) primary.listPrice = Number(listPrice);
+    if (tierPrices) primary.tierPrices = tierPrices;
+    await primary.save();
+    if (sellingPrice != null || listPrice != null) {
+      const patch = {};
+      if (sellingPrice != null) patch.sellingPrice = Number(sellingPrice);
+      if (listPrice != null) patch.listPrice = Number(listPrice);
+      await ProductVariant.updateMany({ productId: product._id, _id: { $ne: primary._id } }, patch);
+    }
+  } else if (sellingPrice != null || listPrice != null) {
     const patch = {};
     if (sellingPrice != null) patch.sellingPrice = Number(sellingPrice);
     if (listPrice != null) patch.listPrice = Number(listPrice);
@@ -240,6 +262,66 @@ export async function updateProduct(req, id, body) {
   }
   if (availableQty != null) await setProductAvailable(product, Number(availableQty));
   return product;
+}
+
+export async function bulkUploadProducts(req, items = []) {
+  if (!req.tenantId) throw new AppError(400, "Tenant context required", "TENANT_REQUIRED");
+  const created = [];
+  const updated = [];
+  const errors = [];
+
+  for (const [index, row] of items.entries()) {
+    try {
+      const sku = String(row.sku || "").trim().toUpperCase();
+      if (!sku) throw new AppError(400, "SKU is required", "VALIDATION_ERROR");
+      const wholesale = {
+        bulkEligible: row.wholesale?.bulkEligible !== false,
+        moq: Number(row.wholesale?.moq || 1),
+        maxQty: row.wholesale?.maxQty == null || row.wholesale?.maxQty === "" ? null : Number(row.wholesale.maxQty),
+        packMultiple: Math.max(1, Number(row.wholesale?.packMultiple || 1)),
+        caseQty: Number(row.wholesale?.caseQty || 1),
+        leadTimeDays: Number(row.wholesale?.leadTimeDays || 0),
+      };
+      const existing = await Product.findOne({ tenantId: req.tenantId, sku });
+      const tierPrices = Array.isArray(row.tierPrices) ? row.tierPrices : undefined;
+      if (existing) {
+        const next = await updateProduct(req, existing._id, {
+          name: row.name,
+          sellingPrice: row.sellingPrice,
+          listPrice: row.listPrice ?? row.sellingPrice,
+          categoryId: row.categoryId,
+          brandId: row.brandId,
+          wholesale: { ...(existing.wholesale?.toObject?.() || existing.wholesale || {}), ...wholesale },
+          tierPrices,
+          availableQty: row.availableQty,
+          status: row.status,
+        });
+        if (row.publish) await publishProduct(req, existing._id);
+        updated.push({ index, id: next._id, sku });
+      } else {
+        const product = await createProduct(req, {
+          name: row.name,
+          sku,
+          sellingPrice: row.sellingPrice,
+          listPrice: row.listPrice ?? row.sellingPrice,
+          categoryId: row.categoryId,
+          brandId: row.brandId,
+          status: row.status || "draft",
+          wholesale,
+          tierPrices,
+          ...(row.warehouseId != null && row.availableQty != null
+            ? { initialStock: { warehouseId: row.warehouseId, qty: row.availableQty } }
+            : {}),
+        });
+        if (row.publish) await publishProduct(req, product._id);
+        created.push({ index, id: product._id, sku });
+      }
+    } catch (err) {
+      errors.push({ index, sku: row.sku, message: err.message || "Failed", code: err.code || "ERROR" });
+    }
+  }
+
+  return { created, updated, errors, ok: errors.length === 0 };
 }
 
 export async function deleteProduct(req, id) {
@@ -348,6 +430,7 @@ export async function lookupBySlug(slug, pack, req) {
       offers: liveOffers,
       available,
       orderLimit: product.wholesale?.maxQty ?? null,
+      wholesale: product.wholesale || {},
     },
     variant,
     variants: withStock,
@@ -364,6 +447,11 @@ export async function searchCatalog(req) {
   if (req.query.categoryId) filter.categoryId = req.query.categoryId;
   if (req.query.brandId) filter.brandId = req.query.brandId;
   if (req.query.tag) filter.tags = req.query.tag;
+  if (req.query.bulkEligible === "true" || req.query.bulkEligible === "1") {
+    filter["wholesale.bulkEligible"] = true;
+  } else if (req.query.bulkEligible === "false" || req.query.bulkEligible === "0") {
+    filter["wholesale.bulkEligible"] = { $ne: true };
+  }
   if (req.query.q) {
     filter.$or = [
       { name: new RegExp(req.query.q, "i") },

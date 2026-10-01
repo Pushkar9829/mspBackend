@@ -6,6 +6,8 @@ const cartItemSchema = new mongoose.Schema(
     productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
     variantId: { type: mongoose.Schema.Types.ObjectId, ref: "ProductVariant", required: true },
     qty: { type: Number, required: true, min: 1 },
+    /** Bulk lines get MOQ/pack/max rules and slab prices; the same variant can also sit in a regular line. */
+    bulk: { type: Boolean, default: false },
     fulfillmentMode: { type: String, enum: ["store_pickup", "delivery_partner"], default: "delivery_partner" },
   },
   { _id: true }

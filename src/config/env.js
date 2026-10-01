@@ -71,6 +71,7 @@ export const env = {
 
 export function isOriginAllowed(origin) {
   if (!origin) return true;
+  if (!env.isProd && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
   return env.corsOrigins.some((allowed) => {
     if (allowed === "*" || allowed === origin) return true;
     if (!allowed.includes("*")) return false;

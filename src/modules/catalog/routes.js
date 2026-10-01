@@ -17,6 +17,7 @@ import {
   updateBrandSchema,
   createProductSchema,
   updateProductSchema,
+  bulkUploadProductsSchema,
   createVariantSchema,
   updateVariantSchema,
   idParamSchema,
@@ -126,6 +127,16 @@ productRouter.get("/", authorize("products.view"), asyncHandler(async (req, res)
   const staff = req.permissions.includes("*") || req.permissions.includes("products.edit") || req.permissions.includes("products.create");
   res.json(await service.listProducts(req, { buyer: !staff }));
 }));
+productRouter.post(
+  "/bulk-upload",
+  authorize("products.create"),
+  requireTenant,
+  validate(bulkUploadProductsSchema),
+  audit("bulk_upload", "product"),
+  asyncHandler(async (req, res) => {
+    res.status(201).json(await service.bulkUploadProducts(req, req.body.items));
+  })
+);
 productRouter.get("/:id", authorize("products.view"), validate(idParamSchema), asyncHandler(async (req, res) => {
   const staff = req.permissions.includes("*") || req.permissions.includes("products.edit") || req.permissions.includes("products.create");
   res.json(await service.getProduct(req, req.params.id, { buyer: !staff }));

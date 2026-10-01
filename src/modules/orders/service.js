@@ -5,7 +5,8 @@ import { paginate, paginated } from "../../utils/pagination.js";
 import { tenantFilter } from "../../middleware/tenantScope.js";
 import { ORDER_STATUSES } from "../../config/constants.js";
 import { emitDomain } from "../../utils/events.js";
-import { confirmOrder, cancelOrder, refundOrder } from "../checkout/service.js";
+import { confirmOrder, cancelOrder, refundOrder, BUYER_CANCELLABLE_STATUSES } from "../checkout/service.js";
+import { getInvoiceForOrder } from "../invoices/service.js";
 import { addItem, getOrCreateCart, quoteCart } from "../cart/service.js";
 
 function escapeRegex(value) {
@@ -36,9 +37,14 @@ const ALLOWED = {
   ready_to_ship: ["shipped", "cancelled"],
   shipped: ["out_for_delivery"],
   out_for_delivery: ["delivered"],
-  delivered: ["return_requested"],
+  delivered: ["return_requested", "refunded"],
   return_requested: ["refunded"],
 };
+
+export async function getInvoice(req, id) {
+  const order = await getOrder(req, id);
+  return getInvoiceForOrder(order);
+}
 
 function parseDate(value, endOfDay = false) {
   if (!value) return null;
@@ -99,21 +105,44 @@ export async function updateNotes(req, id, { sellerNotes } = {}) {
   return order;
 }
 
+function hasPerm(req, perm) {
+  const perms = req.permissions || [];
+  return perms.includes("*") || perms.includes(perm);
+}
+
 export async function updateStatus(req, id, status, note) {
   if (!ORDER_STATUSES.includes(status)) {
     throw new AppError(400, "Invalid status", "VALIDATION_ERROR");
   }
   const order = await getOrder(req, id);
-  if (status === "confirmed") return confirmOrder(order, req.user._id);
-  if (status === "cancelled") return cancelOrder(order, req.user._id, note);
-  if (status === "refunded") return refundOrder(order, req.user._id, note);
 
   const allowed = ALLOWED[order.status] || [];
   if (!allowed.includes(status)) {
     throw new AppError(400, `Cannot move from ${order.status} to ${status}`, "INVALID_STATE");
   }
+  if (ownOrdersOnly(req)) {
+    if (status !== "cancelled" || !hasPerm(req, "orders.cancel")) {
+      throw new AppError(403, "You can only cancel your own orders", "FORBIDDEN");
+    }
+    if (!BUYER_CANCELLABLE_STATUSES.includes(order.status)) {
+      throw new AppError(400, "This order can no longer be cancelled. Contact support.", "INVALID_STATE");
+    }
+  } else if (status === "refunded") {
+    if (!hasPerm(req, "orders.refund")) throw new AppError(403, "Missing permission orders.refund", "FORBIDDEN");
+  } else if (status === "cancelled") {
+    if (!hasPerm(req, "orders.cancel") && !hasPerm(req, "orders.update")) {
+      throw new AppError(403, "Missing permission orders.cancel", "FORBIDDEN");
+    }
+  } else if (!hasPerm(req, "orders.update")) {
+    throw new AppError(403, "Missing permission orders.update", "FORBIDDEN");
+  }
+
+  if (status === "confirmed") return confirmOrder(order, req.user._id);
+  if (status === "cancelled") return cancelOrder(order, req.user._id, note);
+  if (status === "refunded") return refundOrder(order, req.user._id, note);
   order.status = status;
   order.statusHistory.push({ status, actorId: req.user._id, note: note || "" });
+  if (status === "delivered" && order.paymentMethod === "cod") order.paymentStatus = "paid";
   if (status === "shipped" && req.body?.trackingNumber) {
     order.fulfillments.push({
       carrier: req.body.carrier || "",
@@ -148,6 +177,7 @@ export async function reorder(req, id) {
       await addItem(req.user._id, null, {
         variantId: item.variantId,
         qty: item.qty,
+        bulk: Boolean(item.bulk),
         fulfillmentMode: item.fulfillmentMode,
       });
       added.push({ name: item.name, qty: item.qty });
