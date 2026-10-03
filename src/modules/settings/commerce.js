@@ -28,12 +28,17 @@ async function readCommerceValue(tenantId, key, fallback) {
 }
 
 export async function getCommerceSettings(tenantId = null) {
-  const [feeEnabled, feeAmount, feePercent, partnerChoice, partners] = await Promise.all([
+  const [feeEnabled, feeAmount, feePercent, partnerChoice, partners, platformCod, storeCod, freeAbove, returnsOn, returnDays] = await Promise.all([
     readCommerceValue(tenantId, "platform.feeEnabled", false),
     readCommerceValue(tenantId, "platform.feeAmount", 10),
     readCommerceValue(tenantId, "platform.feePercent", 0),
     readCommerceValue(tenantId, "platform.deliveryPartnerChoiceEnabled", true),
     readCommerceValue(tenantId, "platform.deliveryPartners", DEFAULT_DELIVERY_PARTNERS),
+    getSetting("platform", null, "payments.codEnabled", true),
+    tenantId ? getSetting("tenant", tenantId, "payments.codEnabled", true) : true,
+    tenantId ? getSetting("tenant", tenantId, "delivery.freeAbove", 0) : 0,
+    getSetting("platform", null, "returns.enabled", true),
+    getSetting("platform", null, "returns.windowDays", 7),
   ]);
   return {
     feeEnabled: Boolean(feeEnabled),
@@ -41,6 +46,15 @@ export async function getCommerceSettings(tenantId = null) {
     feePercent: Math.max(0, Number(feePercent) || 0),
     deliveryPartnerChoiceEnabled: Boolean(partnerChoice),
     deliveryPartners: normalizePartners(partners),
+    /** COD needs both the platform admin and the store to allow it. */
+    platformCodEnabled: platformCod !== false,
+    storeCodEnabled: storeCod !== false,
+    codEnabled: platformCod !== false && storeCod !== false,
+    /** Store promotion: no delivery or partner fee once the order (after coupon) reaches this. 0 = off. */
+    freeDeliveryAbove: Math.max(0, Number(freeAbove) || 0),
+    /** One return policy for the whole platform; it covers items marked "Easy return". */
+    returnsEnabled: returnsOn !== false,
+    returnWindowDays: Math.max(1, Number(returnDays) || 7),
   };
 }
 
@@ -67,5 +81,9 @@ export function publicCommerce(commerce) {
     platformFeePercent: commerce.feePercent || 0,
     deliveryPartnerChoiceEnabled: Boolean(commerce.deliveryPartnerChoiceEnabled),
     deliveryPartners: commerce.deliveryPartners,
+    codEnabled: Boolean(commerce.codEnabled),
+    freeDeliveryAbove: commerce.freeDeliveryAbove || 0,
+    returnsEnabled: commerce.returnsEnabled !== false,
+    returnWindowDays: commerce.returnWindowDays || 7,
   };
 }

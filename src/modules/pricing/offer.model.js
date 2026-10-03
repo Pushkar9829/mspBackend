@@ -9,6 +9,8 @@ const offerSchema = new mongoose.Schema(
     productIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Product" }],
     categoryIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Category" }],
     customerIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
+    /** all = every purchase, regular = single (non-bulk) purchases, bulk = bulk purchases only. */
+    appliesTo: { type: String, enum: ["all", "regular", "bulk"], default: "all" },
     inventoryCap: { type: Number, default: null },
     inventoryUsed: { type: Number, default: 0 },
     startsAt: { type: Date, required: true },

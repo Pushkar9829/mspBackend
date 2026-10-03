@@ -2,6 +2,8 @@ import mongoose from "mongoose";
 
 const categorySchema = new mongoose.Schema(
   {
+    /** null = shared platform category (super-admin only); set = a store's own category. */
+    tenantId: { type: mongoose.Schema.Types.ObjectId, ref: "Tenant", default: null, index: true },
     name: { type: String, required: true, trim: true },
     slug: { type: String, required: true, unique: true, lowercase: true },
     parentId: { type: mongoose.Schema.Types.ObjectId, ref: "Category", default: null, index: true },

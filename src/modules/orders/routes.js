@@ -5,6 +5,7 @@ import { resolveTenant } from "../../middleware/tenantScope.js";
 import { audit } from "../../middleware/audit.js";
 import { asyncHandler } from "../../utils/asyncHandler.js";
 import * as service from "./service.js";
+import { getCommerceSettings } from "../settings/commerce.js";
 
 const router = Router();
 router.use(authenticate);
@@ -22,8 +23,29 @@ router.get("/:id/invoice", authorize("orders.view"), asyncHandler(async (req, re
   res.json(await service.getInvoice(req, req.params.id));
 }));
 router.get("/:id", authorize("orders.view"), asyncHandler(async (req, res) => {
-  res.json(await service.getOrder(req, req.params.id));
+  const [order, commerce] = await Promise.all([service.getOrder(req, req.params.id), getCommerceSettings()]);
+  res.json({
+    ...order.toObject(),
+    returnUntil: service.returnDeadline(order, commerce),
+    returnWindowDays: commerce.returnWindowDays,
+  });
 }));
+router.post(
+  "/:id/return",
+  authorize("orders.view"),
+  audit("return_request", "order"),
+  asyncHandler(async (req, res) => {
+    res.json(await service.requestReturn(req, req.params.id, req.body || {}));
+  })
+);
+router.post(
+  "/:id/return/reject",
+  authorize("orders.refund"),
+  audit("return_reject", "order"),
+  asyncHandler(async (req, res) => {
+    res.json(await service.rejectReturn(req, req.params.id, req.body?.note));
+  })
+);
 router.post(
   "/:id/status",
   authorizeAny("orders.update", "orders.cancel", "orders.refund"),

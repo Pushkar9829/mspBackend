@@ -29,7 +29,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX
 
 export const categoryRouter = Router();
 categoryRouter.get("/", optionalAuth, asyncHandler(async (req, res) => {
-  res.json(await service.listCategories(req.query));
+  res.json(await service.listCategories(req));
 }));
 categoryRouter.post(
   "/",
@@ -38,7 +38,7 @@ categoryRouter.post(
   validate(createCategorySchema),
   audit("create", "category"),
   asyncHandler(async (req, res) => {
-    res.status(201).json(await service.createCategory(req.body));
+    res.status(201).json(await service.createCategory(req, req.body));
   })
 );
 categoryRouter.patch(
@@ -48,7 +48,7 @@ categoryRouter.patch(
   validate(updateCategorySchema),
   audit("update", "category"),
   asyncHandler(async (req, res) => {
-    res.json(await service.updateCategory(req.params.id, req.body));
+    res.json(await service.updateCategory(req, req.params.id, req.body));
   })
 );
 categoryRouter.delete(
@@ -58,7 +58,7 @@ categoryRouter.delete(
   validate(idParamSchema),
   audit("delete", "category"),
   asyncHandler(async (req, res) => {
-    res.json(await service.deleteCategory(req.params.id));
+    res.json(await service.deleteCategory(req, req.params.id));
   })
 );
 

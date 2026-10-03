@@ -8,6 +8,7 @@ import { emitDomain } from "../../utils/events.js";
 import { confirmOrder, cancelOrder, refundOrder, BUYER_CANCELLABLE_STATUSES } from "../checkout/service.js";
 import { getInvoiceForOrder } from "../invoices/service.js";
 import { addItem, getOrCreateCart, quoteCart } from "../cart/service.js";
+import { getCommerceSettings } from "../settings/commerce.js";
 
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -139,9 +140,24 @@ export async function updateStatus(req, id, status, note) {
 
   if (status === "confirmed") return confirmOrder(order, req.user._id);
   if (status === "cancelled") return cancelOrder(order, req.user._id, note);
-  if (status === "refunded") return refundOrder(order, req.user._id, note);
+  if (status === "refunded") {
+    const refunded = await refundOrder(order, req.user._id, note);
+    if (order.returnRequest?.status === "requested") {
+      return Order.findByIdAndUpdate(
+        refunded._id,
+        {
+          "returnRequest.status": "approved",
+          "returnRequest.decidedAt": new Date(),
+          "returnRequest.decisionNote": note || "",
+        },
+        { new: true }
+      );
+    }
+    return refunded;
+  }
   order.status = status;
   order.statusHistory.push({ status, actorId: req.user._id, note: note || "" });
+  if (status === "delivered") order.deliveredAt = new Date();
   if (status === "delivered" && order.paymentMethod === "cod") order.paymentStatus = "paid";
   if (status === "shipped" && req.body?.trackingNumber) {
     order.fulfillments.push({
@@ -165,6 +181,77 @@ export async function updateStatus(req, id, status, note) {
       resourceId: order._id,
     });
   }
+  return order;
+}
+
+function deliveredAt(order) {
+  if (order.deliveredAt) return new Date(order.deliveredAt);
+  const entry = [...(order.statusHistory || [])].reverse().find((h) => h.status === "delivered");
+  return entry?.at ? new Date(entry.at) : new Date(order.updatedAt);
+}
+
+/** Last moment a return can be requested, or null when the order has nothing returnable. */
+export function returnDeadline(order, commerce) {
+  if (!commerce.returnsEnabled || order.status !== "delivered") return null;
+  if (!(order.items || []).some((item) => item.easyReturn)) return null;
+  return new Date(deliveredAt(order).getTime() + commerce.returnWindowDays * 24 * 60 * 60 * 1000);
+}
+
+export async function requestReturn(req, id, { reason, note } = {}) {
+  const order = await getOrder(req, id);
+  if (String(order.buyerId?._id || order.buyerId) !== String(req.user._id)) {
+    throw new AppError(403, "Only the buyer can request a return", "FORBIDDEN");
+  }
+  const commerce = await getCommerceSettings();
+  if (!commerce.returnsEnabled) throw new AppError(400, "Returns are not available right now", "RETURNS_DISABLED");
+  if (order.returnRequest?.status) throw new AppError(400, "A return was already requested for this order", "INVALID_STATE");
+  if (order.status !== "delivered") throw new AppError(400, "Returns can be requested only after delivery", "INVALID_STATE");
+  const deadline = returnDeadline(order, commerce);
+  if (!deadline) throw new AppError(400, "None of the items in this order can be returned", "NOT_RETURNABLE");
+  if (Date.now() > deadline.getTime()) {
+    throw new AppError(400, `The ${commerce.returnWindowDays}-day return window has ended`, "RETURN_WINDOW_OVER");
+  }
+  const cleanReason = String(reason || "").trim();
+  if (!cleanReason) throw new AppError(400, "Choose a reason for the return", "VALIDATION_ERROR");
+
+  order.returnRequest = {
+    status: "requested",
+    reason: cleanReason.slice(0, 120),
+    note: String(note || "").trim().slice(0, 1000),
+    requestedAt: new Date(),
+  };
+  order.status = "return_requested";
+  order.statusHistory.push({ status: "return_requested", actorId: req.user._id, note: cleanReason });
+  await order.save();
+  emitDomain("ORDER_RETURN_REQUESTED", {
+    orderId: order._id,
+    tenantId: order.tenantId?._id || order.tenantId,
+    buyerId: order.buyerId?._id || order.buyerId,
+    userId: order.buyerId?._id || order.buyerId,
+    actorId: req.user._id,
+    orderNumber: order.orderNumber,
+    total: order.total,
+    resource: "order",
+    resourceId: order._id,
+  });
+  return order;
+}
+
+/** Seller turns a return down; the order goes back to delivered. Approving is a refund. */
+export async function rejectReturn(req, id, note) {
+  if (ownOrdersOnly(req)) throw new AppError(403, "Only the store can reject a return", "FORBIDDEN");
+  const order = await getOrder(req, id);
+  if (order.status !== "return_requested" || order.returnRequest?.status !== "requested") {
+    throw new AppError(400, "There is no open return request on this order", "INVALID_STATE");
+  }
+  const reason = String(note || "").trim();
+  if (!reason) throw new AppError(400, "Tell the buyer why the return was rejected", "VALIDATION_ERROR");
+  order.status = "delivered";
+  order.returnRequest.status = "rejected";
+  order.returnRequest.decidedAt = new Date();
+  order.returnRequest.decisionNote = reason.slice(0, 1000);
+  order.statusHistory.push({ status: "delivered", actorId: req.user._id, note: `Return rejected: ${reason}` });
+  await order.save();
   return order;
 }
 

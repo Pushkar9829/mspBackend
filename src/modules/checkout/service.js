@@ -105,6 +105,9 @@ export async function checkout({
   const address = await getAddressForUser(user._id, addressId);
   const quote = await quoteCart(cart, user._id, address, { deliveryPartnerId, strictCoupon: true });
   assertCheckoutable(quote);
+  if (paymentMethod === "cod" && !quote.codEnabled) {
+    throw new AppError(400, "Cash on delivery is not available for this order", "COD_DISABLED");
+  }
   if (expectedGrandTotal != null && Math.abs(Number(expectedGrandTotal) - quote.grandTotal) > 0.01) {
     throw new AppError(
       409,

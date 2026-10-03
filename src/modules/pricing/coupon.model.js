@@ -12,6 +12,9 @@ const couponSchema = new mongoose.Schema(
     redemptionCount: { type: Number, default: 0 },
     perCustomerLimit: { type: Number, default: 1 },
     excludedProductIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Product" }],
+    appliesTo: { type: String, enum: ["all", "regular", "bulk"], default: "all" },
+    /** Only for a buyer's first order with this store. */
+    firstOrderOnly: { type: Boolean, default: false },
     status: { type: String, enum: ["active", "disabled"], default: "active" },
     startsAt: { type: Date, default: null },
     endsAt: { type: Date, default: null },

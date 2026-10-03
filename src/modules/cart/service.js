@@ -141,6 +141,11 @@ export async function removeItem(userId, guestKey, itemId) {
 }
 
 export async function updateQty(userId, guestKey, itemId, qty) {
+  return updateItem(userId, guestKey, itemId, { qty });
+}
+
+/** Change a line's quantity and/or how it is fulfilled (delivery vs store pickup). */
+export async function updateItem(userId, guestKey, itemId, { qty, fulfillmentMode } = {}) {
   const cart = await getOrCreateCart(userId, guestKey);
   const item = cart.items.id(itemId);
   if (!item) throw new AppError(404, "Cart item not found", "NOT_FOUND");
@@ -151,10 +156,19 @@ export async function updateQty(userId, guestKey, itemId, qty) {
   if (!product || !variant || product.status !== "published" || variant.status !== "active") {
     throw new AppError(400, "Product is not available", "UNAVAILABLE");
   }
-  const others = bulkQtyInCart(cart, product._id, { excludeItemId: item._id });
-  validateWholesale(product, qty, others + qty, item.bulk);
-  await assertStock(item.tenantId, variant, qty + variantQtyInCart(cart, variant._id, { excludeItemId: item._id }));
-  item.qty = qty;
+  if (qty != null) {
+    const others = bulkQtyInCart(cart, product._id, { excludeItemId: item._id });
+    validateWholesale(product, qty, others + qty, item.bulk);
+    await assertStock(item.tenantId, variant, qty + variantQtyInCart(cart, variant._id, { excludeItemId: item._id }));
+    item.qty = qty;
+  }
+  if (fulfillmentMode) {
+    const mode = resolveFulfillment(product, fulfillmentMode);
+    if (mode !== fulfillmentMode) {
+      throw new AppError(400, "This product doesn’t offer that delivery option", "MODE_UNAVAILABLE");
+    }
+    item.fulfillmentMode = mode;
+  }
   await cart.save();
   return quoteCart(cart, userId);
 }
@@ -319,7 +333,14 @@ export async function quoteCart(cart, buyerId, address = null, { strictCoupon = 
     const platformFee = computePlatformFee(commerce, Math.max(0, subtotal - couponDiscount), {
       includeFlat: groupIndex === 0,
     });
-    const partnerFee = hasDelivery && partner ? round2(partner.fee) : 0;
+    let partnerFee = hasDelivery && partner ? round2(partner.fee) : 0;
+    const payable = round2(subtotal - couponDiscount);
+    const freeDeliveryAbove = hasDelivery ? commerce.freeDeliveryAbove : 0;
+    const freeDelivery = freeDeliveryAbove > 0 && payable >= freeDeliveryAbove;
+    if (freeDelivery) {
+      deliveryFee = 0;
+      partnerFee = 0;
+    }
     const total = round2(subtotal - couponDiscount + deliveryFee + platformFee + partnerFee);
     groups.push({
       tenantId,
@@ -338,6 +359,10 @@ export async function quoteCart(cart, buyerId, address = null, { strictCoupon = 
       deliveryPartnerChoiceEnabled: commerce.deliveryPartnerChoiceEnabled,
       deliveryPartners: commerce.deliveryPartners,
       platformFeeEnabled: commerce.feeEnabled,
+      codEnabled: commerce.codEnabled,
+      freeDeliveryAbove,
+      freeDelivery,
+      freeDeliveryRemaining: freeDeliveryAbove > 0 && !freeDelivery ? round2(freeDeliveryAbove - payable) : 0,
       total,
       serviceability,
       eta,
@@ -374,6 +399,7 @@ export async function quoteCart(cart, buyerId, address = null, { strictCoupon = 
     couponDiscount,
     grandTotal: round2(groups.reduce((s, g) => s + g.total, 0)),
     hasBulk: lines.some((line) => line.bulk),
+    codEnabled: groups.length > 0 && groups.every((g) => g.codEnabled),
   };
 }
 
@@ -452,6 +478,8 @@ export async function listCartCoupons(userId, guestKey) {
       type: doc.type,
       value: doc.value,
       minCartValue: doc.minCartValue || 0,
+      appliesTo: doc.appliesTo || "all",
+      firstOrderOnly: Boolean(doc.firstOrderOnly),
       savings: preview.discount,
       eligible: preview.eligible,
       reason: preview.reason,

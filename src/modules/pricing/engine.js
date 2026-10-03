@@ -3,6 +3,7 @@ import { Offer } from "./offer.model.js";
 import { Coupon } from "./coupon.model.js";
 import { CouponUsage } from "./couponUsage.model.js";
 import { Product } from "../catalog/product.model.js";
+import { Order } from "../orders/order.model.js";
 import { AppError } from "../../utils/AppError.js";
 
 export function matchTier(tiers, qty) {
@@ -73,7 +74,15 @@ export function serializeOffer(offer) {
   };
 }
 
-export function matchingOffers(offers, product, buyerId) {
+/** Whether an offer/coupon aimed at all, single (regular) or bulk purchases covers this line. */
+export function coversPurchase(appliesTo, bulk) {
+  if (appliesTo === "bulk") return Boolean(bulk);
+  if (appliesTo === "regular") return !bulk;
+  return true;
+}
+
+/** Pass `{ bulk }` to keep only offers for that kind of purchase; omit it to get every matching offer. */
+export function matchingOffers(offers, product, buyerId, { bulk } = {}) {
   const tenantId = String(product.tenantId?._id || product.tenantId || "");
   const ctx = {
     productId: product._id,
@@ -82,6 +91,7 @@ export function matchingOffers(offers, product, buyerId) {
   };
   return (offers || []).filter((offer) => {
     if (tenantId && String(offer.tenantId) !== tenantId) return false;
+    if (bulk !== undefined && !coversPurchase(offer.appliesTo, bulk)) return false;
     if (offer.inventoryCap != null && offer.inventoryUsed >= offer.inventoryCap) return false;
     return offerApplies(offer, ctx);
   });
@@ -101,7 +111,8 @@ export function bestOfferForPrice(offers, unitPrice) {
 }
 
 export function applyOffersToVariants(variants, offers, product, buyerId) {
-  const matched = matchingOffers(offers, product, buyerId);
+  const matched = matchingOffers(offers, product, buyerId, { bulk: false });
+  const matchedBulk = matchingOffers(offers, product, buyerId, { bulk: true });
   return (variants || []).map((v) => {
     const raw = typeof v.toObject === "function" ? v.toObject() : { ...v };
     const { offer, discount } = bestOfferForPrice(matched, raw.sellingPrice);
@@ -111,7 +122,7 @@ export function applyOffersToVariants(variants, offers, product, buyerId) {
           .sort((a, b) => Number(a.minQty) - Number(b.minQty))
           .map((t) => {
             const slab = Math.min(Number(raw.sellingPrice), Number(t.unitPrice));
-            const off = bestOfferForPrice(matched, slab).discount;
+            const off = bestOfferForPrice(matchedBulk, slab).discount;
             return {
               minQty: t.minQty,
               maxQty: t.maxQty ?? null,
@@ -177,7 +188,7 @@ export async function calculateLinePrice({ variant, product, qty, buyerId, tenan
     endsAt: { $gte: new Date() },
   });
 
-  const matched = matchingOffers(offers, product || { _id: variant.productId, tenantId }, buyerId);
+  const matched = matchingOffers(offers, product || { _id: variant.productId, tenantId }, buyerId, { bulk: Boolean(bulk) });
   const tierInput = unitPrice;
   const { offer, discount: offerDiscount } = bestOfferForPrice(matched, unitPrice);
   if (offer) breakdown.push({ step: "offer", amount: unitPrice - offerDiscount, offerId: offer._id });
@@ -213,8 +224,7 @@ export async function calculateLinePrice({ variant, product, qty, buyerId, tenan
  * GST on the discounted amount. Mutates and returns the lines.
  */
 export function allocateCoupon(lines, discount, coupon) {
-  const excluded = new Set((coupon?.excludedProductIds || []).map((id) => String(id)));
-  const eligible = lines.filter((l) => !excluded.has(String(l.productId)));
+  const eligible = lines.filter((l) => couponCoversLine(coupon, l));
   const base = eligible.reduce((s, l) => s + l.lineSubtotal, 0);
   let remaining = round2(discount || 0);
   for (const line of lines) {
@@ -236,6 +246,11 @@ export function allocateCoupon(lines, discount, coupon) {
     line.lineTotal = net;
   }
   return lines;
+}
+
+function couponCoversLine(coupon, line) {
+  if (coupon?.excludedProductIds?.some((id) => String(id) === String(line.productId))) return false;
+  return coversPurchase(coupon?.appliesTo, line.bulk);
 }
 
 export async function applyCoupon({ tenantId, code, buyerId, subtotal, items }) {
@@ -261,10 +276,20 @@ export async function applyCoupon({ tenantId, code, buyerId, subtotal, items }) 
       throw new AppError(400, "Coupon already used", "COUPON_LIMIT");
     }
   }
+  if (coupon.firstOrderOnly) {
+    if (!buyerId) throw new AppError(400, "Log in to use this first-order coupon", "COUPON_FIRST_ORDER");
+    const previous = await Order.exists({ tenantId, buyerId, status: { $ne: "cancelled" } });
+    if (previous) throw new AppError(400, "This coupon is only for your first order with this store", "COUPON_FIRST_ORDER");
+  }
 
-  const eligibleSubtotal = items
-    .filter((i) => !coupon.excludedProductIds?.some((id) => String(id) === String(i.productId)))
-    .reduce((s, i) => s + i.lineSubtotal, 0);
+  const eligibleSubtotal = items.filter((i) => couponCoversLine(coupon, i)).reduce((s, i) => s + i.lineSubtotal, 0);
+  if (eligibleSubtotal <= 0 && coupon.appliesTo && coupon.appliesTo !== "all") {
+    throw new AppError(
+      400,
+      coupon.appliesTo === "bulk" ? "This coupon is only for bulk purchases" : "This coupon is only for single (non-bulk) purchases",
+      "COUPON_SCOPE"
+    );
+  }
 
   const discount =
     coupon.type === "percent"

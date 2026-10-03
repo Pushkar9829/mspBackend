@@ -9,7 +9,7 @@ import { Tenant } from "../tenants/tenant.model.js";
 import { AppError } from "../../utils/AppError.js";
 import { slugify } from "../../utils/slug.js";
 import { paginate, paginated } from "../../utils/pagination.js";
-import { tenantFilter } from "../../middleware/tenantScope.js";
+import { asObjectId, tenantFilter } from "../../middleware/tenantScope.js";
 import { storage } from "../../utils/storage.js";
 import { checkServiceability } from "../location/service.js";
 import { emitDomain } from "../../utils/events.js";
@@ -20,27 +20,110 @@ import {
   serializeOffer,
 } from "../pricing/engine.js";
 
-export async function listCategories(query) {
+function staffTenantId(req) {
+  if (req.isPlatformAdmin) return req.tenantId || null;
+  return asObjectId(req.user?.tenantId);
+}
+
+/**
+ * Shared categories plus the caller's own: a store sees its categories, a buyer browsing a store
+ * sees that store's, and the open shop sees store categories that have something published.
+ */
+export async function listCategories(req) {
+  const query = req.query || {};
   const filter = {};
   if (query.parentId === "null") filter.parentId = null;
   else if (query.parentId) filter.parentId = query.parentId;
   if (query.status) filter.status = query.status;
+
+  const isStaff = req.isPlatformAdmin || (req.permissions || []).includes("categories.create");
+  const ownTenant = req.user && isStaff ? staffTenantId(req) : null;
+  if (query.scope === "platform") {
+    filter.tenantId = null;
+  } else if (req.isPlatformAdmin && !ownTenant && query.scope === "all") {
+    // every category
+  } else if (ownTenant) {
+    filter.tenantId = { $in: [null, ownTenant] };
+  } else if (asObjectId(query.tenantId)) {
+    filter.tenantId = { $in: [null, asObjectId(query.tenantId)] };
+  } else {
+    const used = await Product.distinct("categoryId", { status: "published", enabled: { $ne: false } });
+    filter.$or = [{ tenantId: null }, { _id: { $in: used.filter(Boolean) } }];
+  }
   return Category.find(filter).sort({ sortOrder: 1, name: 1 });
 }
 
-export async function createCategory(body) {
-  const slug = slugify(body.slug || body.name);
-  return Category.create({ ...body, slug });
+async function uniqueCategorySlug(base, excludeId) {
+  let slug = base;
+  for (let n = 2; await Category.exists({ slug, ...(excludeId ? { _id: { $ne: excludeId } } : {}) }); n += 1) {
+    slug = `${base}-${n}`;
+  }
+  return slug;
 }
 
-export async function updateCategory(id, body) {
-  if (body.slug) body.slug = slugify(body.slug);
-  const cat = await Category.findByIdAndUpdate(id, body, { new: true, runValidators: true });
+async function categorySlug(name, tenantId, excludeId) {
+  let base = slugify(name);
+  if (tenantId) {
+    const tenant = await Tenant.findById(tenantId).select("slug").lean();
+    if (tenant?.slug) base = `${base}-${tenant.slug}`;
+  }
+  return uniqueCategorySlug(base, excludeId);
+}
+
+/** Stores may only touch their own categories; the platform admin can touch any. */
+async function editableCategory(req, id) {
+  const cat = await Category.findById(id);
   if (!cat) throw new AppError(404, "Category not found", "NOT_FOUND");
+  if (req.isPlatformAdmin) return cat;
+  const own = staffTenantId(req);
+  if (!cat.tenantId || String(cat.tenantId) !== String(own)) {
+    throw new AppError(403, "Shared categories are managed by the platform admin", "FORBIDDEN");
+  }
   return cat;
 }
 
-export async function deleteCategory(id) {
+/** A product can use a shared category or one of its own store's categories. */
+export async function assertCategoryUsable(categoryId, tenantId) {
+  if (!categoryId) return;
+  const cat = await Category.findById(categoryId).select("tenantId").lean();
+  if (!cat) throw new AppError(400, "Category not found", "VALIDATION_ERROR");
+  if (cat.tenantId && String(cat.tenantId) !== String(tenantId)) {
+    throw new AppError(400, "That category belongs to another store", "VALIDATION_ERROR");
+  }
+}
+
+export async function createCategory(req, body) {
+  const tenantId = staffTenantId(req);
+  const parent = body.parentId ? await Category.findById(body.parentId).lean() : null;
+  if (body.parentId && !parent) throw new AppError(400, "Parent category not found", "VALIDATION_ERROR");
+  if (parent?.tenantId && String(parent.tenantId) !== String(tenantId)) {
+    throw new AppError(400, "Parent category belongs to another store", "VALIDATION_ERROR");
+  }
+  const slug = await categorySlug(body.slug || body.name, tenantId);
+  return Category.create({ ...body, tenantId, slug });
+}
+
+export async function updateCategory(req, id, body) {
+  const cat = await editableCategory(req, id);
+  const { tenantId: _ignored, ...changes } = body;
+  if (changes.slug || changes.name) changes.slug = await categorySlug(changes.slug || changes.name, cat.tenantId, cat._id);
+  Object.assign(cat, changes);
+  await cat.save();
+  return cat;
+}
+
+export async function deleteCategory(req, id) {
+  await editableCategory(req, id);
+  const [inUse, children] = await Promise.all([
+    Product.countDocuments({ categoryId: id, status: { $ne: "archived" } }),
+    Category.countDocuments({ parentId: id }),
+  ]);
+  if (inUse) {
+    throw new AppError(409, `Used by ${inUse} product${inUse === 1 ? "" : "s"}. Move them to another category first.`, "IN_USE");
+  }
+  if (children) {
+    throw new AppError(409, `Has ${children} sub-categor${children === 1 ? "y" : "ies"}. Delete or move them first.`, "IN_USE");
+  }
   const cat = await Category.findByIdAndDelete(id);
   if (!cat) throw new AppError(404, "Category not found", "NOT_FOUND");
   return { ok: true, id };
@@ -72,6 +155,7 @@ export async function createBrand(req, body) {
 
 export async function updateBrand(req, id, body) {
   if (body.slug) body.slug = slugify(body.slug);
+  else if (body.name) body.slug = slugify(body.name);
   const brand = await Brand.findOneAndUpdate({ _id: id, ...tenantFilter(req) }, body, {
     new: true,
     runValidators: true,
@@ -81,6 +165,10 @@ export async function updateBrand(req, id, body) {
 }
 
 export async function deleteBrand(req, id) {
+  const inUse = await Product.countDocuments({ brandId: id, status: { $ne: "archived" } });
+  if (inUse) {
+    throw new AppError(409, `Used by ${inUse} product${inUse === 1 ? "" : "s"}. Change their brand first.`, "IN_USE");
+  }
   const brand = await Brand.findOneAndDelete({ _id: id, ...tenantFilter(req) });
   if (!brand) throw new AppError(404, "Brand not found", "NOT_FOUND");
   return { ok: true, id };
@@ -93,6 +181,7 @@ export async function listProducts(req, { buyer = false } = {}) {
   if (req.query.categoryId) filter.categoryId = req.query.categoryId;
   if (req.query.brandId) filter.brandId = req.query.brandId;
   if (req.query.status && !buyer) filter.status = req.query.status;
+  else if (!buyer) filter.status = { $ne: "archived" };
   if (req.query.tag) filter.tags = req.query.tag;
   if (req.query.bulkEligible === "true" || req.query.bulkEligible === "1") {
     filter["wholesale.bulkEligible"] = true;
@@ -176,6 +265,7 @@ export async function createProduct(req, body) {
   if (!req.tenantId) throw new AppError(400, "Tenant context required", "TENANT_REQUIRED");
   const { variant, initialStock, sellingPrice, listPrice, packSize, availableQty, tierPrices, ...rest } = body;
   void availableQty;
+  await assertCategoryUsable(rest.categoryId, req.tenantId);
   const product = await Product.create({
     ...rest,
     sku: String(rest.sku || "").toUpperCase(),
@@ -235,6 +325,11 @@ async function setProductAvailable(product, qty) {
 export async function updateProduct(req, id, body) {
   const { variant, initialStock, sellingPrice, listPrice, availableQty, tierPrices, ...rest } = body;
   if (rest.sku) rest.sku = String(rest.sku).toUpperCase();
+  if (rest.categoryId) {
+    const current = await Product.findOne({ _id: id, ...tenantFilter(req) }).select("tenantId").lean();
+    if (!current) throw new AppError(404, "Product not found", "NOT_FOUND");
+    await assertCategoryUsable(rest.categoryId, current.tenantId);
+  }
   const product = await Product.findOneAndUpdate({ _id: id, ...tenantFilter(req) }, rest, {
     new: true,
     runValidators: true,

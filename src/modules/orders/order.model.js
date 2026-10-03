@@ -77,6 +77,15 @@ const orderSchema = new mongoose.Schema(
     idempotencyKey: { type: String, default: "", index: true },
     etaFrom: Date,
     etaTo: Date,
+    deliveredAt: { type: Date, default: null },
+    returnRequest: {
+      status: { type: String, enum: ["requested", "approved", "rejected", null], default: null },
+      reason: { type: String, default: "" },
+      note: { type: String, default: "" },
+      requestedAt: Date,
+      decidedAt: Date,
+      decisionNote: { type: String, default: "" },
+    },
     statusHistory: [
       {
         status: String,

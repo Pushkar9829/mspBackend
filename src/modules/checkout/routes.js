@@ -45,10 +45,19 @@ cartRouter.post(
 
 cartRouter.patch(
   "/items/:id",
-  validate(z.object({ body: z.object({ qty: z.number().int().positive() }) })),
+  validate(
+    z.object({
+      body: z
+        .object({
+          qty: z.number().int().positive().optional(),
+          fulfillmentMode: z.enum(["store_pickup", "delivery_partner"]).optional(),
+        })
+        .refine((b) => b.qty != null || b.fulfillmentMode, { message: "qty or fulfillmentMode is required" }),
+    })
+  ),
   asyncHandler(async (req, res) => {
     const { userId, guestKey } = cartIdentity(req);
-    res.json(await cartService.updateQty(userId, guestKey, req.params.id, req.body.qty));
+    res.json(await cartService.updateItem(userId, guestKey, req.params.id, req.body));
   })
 );
 

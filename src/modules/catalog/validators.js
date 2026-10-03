@@ -109,7 +109,10 @@ export const createProductSchema = z.object({
 
 export const updateProductSchema = z.object({
   params: z.object({ id: objectId }),
-  body: createProductSchema.shape.body.partial(),
+  body: createProductSchema.shape.body.partial().extend({
+    categoryId: objectId.nullable().optional(),
+    brandId: objectId.nullable().optional(),
+  }),
 });
 
 export const bulkUploadProductsSchema = z.object({

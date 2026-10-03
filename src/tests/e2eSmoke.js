@@ -8,6 +8,8 @@ import { Inventory } from "../modules/inventory/inventory.model.js";
 import { Settings } from "../modules/settings/settings.model.js";
 import { Order } from "../modules/orders/order.model.js";
 import { Invoice } from "../modules/invoices/invoice.model.js";
+import { Coupon } from "../modules/pricing/coupon.model.js";
+import { Category } from "../modules/catalog/category.model.js";
 
 const base = process.env.API_URL || "http://localhost:5000";
 
@@ -216,6 +218,24 @@ try {
   await expectFail("qty 6 rejected", `/api/v1/cart/items/${line.cartItemId}`, { method: "PATCH", token: B, body: { qty: 6 } }, { status: 400, code: "MOQ" });
   quote = await req("/api/v1/cart", { token: B });
   check(findLine(quote, vRules._id, true).line.qty === 12, "rejected updates leave the cart unchanged");
+  {
+    const bulkLine = findLine(quote, vRules._id, true).line;
+    const modes = bulkLine.deliveryModes || [];
+    if (modes.includes("store_pickup") && modes.includes("delivery_partner")) {
+      let q = await req(`/api/v1/cart/items/${bulkLine.cartItemId}`, { method: "PATCH", token: B, body: { fulfillmentMode: "store_pickup" } });
+      check(findLine(q, vRules._id, true).line.fulfillmentMode === "store_pickup", "bulk line switches to store pickup");
+      q = await req(`/api/v1/cart/items/${bulkLine.cartItemId}`, { method: "PATCH", token: B, body: { fulfillmentMode: "delivery_partner" } });
+      check(findLine(q, vRules._id, true).line.fulfillmentMode === "delivery_partner", "bulk line switches back to delivery");
+    } else {
+      const other = modes.includes("store_pickup") ? "delivery_partner" : "store_pickup";
+      await expectFail(
+        "unsupported delivery option rejected",
+        `/api/v1/cart/items/${bulkLine.cartItemId}`,
+        { method: "PATCH", token: B, body: { fulfillmentMode: other } },
+        { status: 400, code: "MODE_UNAVAILABLE" }
+      );
+    }
+  }
   await req(`/api/v1/cart/items/${line.cartItemId}`, { method: "DELETE", token: B });
 
   console.log("Coupon, multi-seller and pickup fees");
@@ -236,6 +256,39 @@ try {
   check(gSmoke.deliveryFee === 0 && gSmoke.partnerFee === 0, "pickup-only seller pays no delivery or partner fee");
   check(gAcme.partnerFee === 40, "delivery seller pays the chosen partner fee (Delhivery ₹40)", gAcme.partnerFee);
   check(near(preview.platformFee, 10), "flat platform fee charged once per checkout (₹10)", preview.platformFee);
+
+  console.log("Promotions");
+  const freeKey = { scope: "tenant", tenantId: acme._id, key: "delivery.freeAbove" };
+  await Settings.findOneAndUpdate(freeKey, { $set: { value: 1 } }, { upsert: true });
+  try {
+    const freePreview = await req("/api/v1/checkout/preview", { method: "POST", token: B, body: { addressId: addr._id, deliveryPartnerId: "delhivery" } });
+    const gFree = freePreview.groups.find((g) => String(g.tenantId) === String(acme._id));
+    check(gFree.freeDelivery && gFree.deliveryFee === 0 && gFree.partnerFee === 0, "free-delivery threshold waives delivery + partner fee");
+  } finally {
+    await Settings.deleteOne(freeKey);
+  }
+
+  const couponCodes = [`BULK${stamp}`, `FIRST${stamp}`];
+  smoke.couponCodes = couponCodes;
+  await req("/api/v1/coupons", {
+    method: "POST",
+    token: vendor.accessToken,
+    body: { code: couponCodes[0], name: "Bulk only 5%", type: "percent", value: 5, appliesTo: "bulk" },
+  });
+  await req("/api/v1/coupons", {
+    method: "POST",
+    token: vendor.accessToken,
+    body: { code: couponCodes[1], name: "First order 5%", type: "percent", value: 5, firstOrderOnly: true },
+  });
+  const cartNow = await req("/api/v1/cart", { token: B });
+  const acmeItems = cartNow.groups.find((g) => String(g.tenantId) === String(acme._id)).items;
+  const bulkBase = acmeItems.filter((i) => i.bulk).reduce((s, i) => s + i.lineSubtotal, 0);
+  const { coupons } = await req("/api/v1/cart/coupons", { token: B });
+  const bulkCoupon = coupons.find((c) => c.code === couponCodes[0]);
+  check(near(bulkCoupon.savings, round2(bulkBase * 0.05)), "bulk-only coupon discounts only bulk lines", [bulkCoupon.savings, bulkBase]);
+  const hadOrder = await Order.exists({ tenantId: acme._id, buyerId: buyer.user?._id || buyer.user?.id, status: { $ne: "cancelled" } });
+  const firstCoupon = coupons.find((c) => c.code === couponCodes[1]);
+  check(firstCoupon.eligible === !hadOrder, `first-order coupon ${hadOrder ? "blocked for a returning buyer" : "open to a new buyer"}`, firstCoupon);
 
   console.log("Checkout safety");
   await expectFail("PO number required", "/api/v1/checkout", {
@@ -284,6 +337,41 @@ try {
   check(invAfter.status === "cancelled", "cancelling marks the invoice cancelled");
   await expectFail("buyer cannot ship", `/api/v1/orders/${oAcme._id}/status`, { method: "POST", token: B, body: { status: "processing" } }, { status: 403 });
 
+  console.log("Returns");
+  await expectFail("no return before delivery", `/api/v1/orders/${oAcme._id}/return`, { method: "POST", token: B, body: { reason: "Damaged" } }, { status: 400 });
+  for (const status of ["processing", "ready_to_ship", "shipped", "out_for_delivery", "delivered"]) {
+    await req(`/api/v1/orders/${oAcme._id}/status`, { method: "POST", token: vendor.accessToken, body: { status } });
+  }
+  await Order.updateOne({ _id: oAcme._id }, { $set: { "items.$[].easyReturn": true } });
+  const delivered = await req(`/api/v1/orders/${oAcme._id}`, { token: B });
+  check(delivered.deliveredAt && delivered.returnUntil, "delivered order shows a return deadline", delivered.returnUntil);
+  const requested = await req(`/api/v1/orders/${oAcme._id}/return`, { method: "POST", token: B, body: { reason: "Damaged or defective item" } });
+  check(requested.status === "return_requested" && requested.returnRequest.status === "requested", "buyer requests a return");
+  await expectFail("buyer cannot reject a return", `/api/v1/orders/${oAcme._id}/return/reject`, { method: "POST", token: B, body: { note: "no" } }, { status: 403 });
+  const rejected = await req(`/api/v1/orders/${oAcme._id}/return/reject`, { method: "POST", token: vendor.accessToken, body: { note: "Seal intact" } });
+  check(rejected.status === "delivered" && rejected.returnRequest.status === "rejected", "seller rejects; order back to delivered");
+  await expectFail("only one return request per order", `/api/v1/orders/${oAcme._id}/return`, { method: "POST", token: B, body: { reason: "Other" } }, { status: 400 });
+
+  console.log("Per-store categories");
+  const ownCat = await req("/api/v1/categories", { method: "POST", token: vendor.accessToken, body: { name: `Smoke Cat ${stamp}` } });
+  smoke.categoryId = ownCat._id;
+  check(String(ownCat.tenantId) === String(acme._id) && ownCat.slug.endsWith(acme.slug), "store category belongs to the store", ownCat);
+  const shared = await Category.findOne({ tenantId: null });
+  if (shared) {
+    await expectFail("store cannot rename a shared category", `/api/v1/categories/${shared._id}`, { method: "PATCH", token: vendor.accessToken, body: { name: "Hacked" } }, { status: 403 });
+  }
+  const storeCats = await req("/api/v1/categories", { token: vendor.accessToken });
+  check(storeCats.some((c) => c._id === ownCat._id), "store sees its own category");
+  await expectFail(
+    "another store's category can't be used",
+    `/api/v1/products/${p2._id}`,
+    { method: "PATCH", token: admin.accessToken, headers: { "X-Tenant-Id": String(tenant2._id) }, body: { categoryId: ownCat._id } },
+    { status: 400 }
+  );
+  await req(`/api/v1/categories/${ownCat._id}`, { method: "DELETE", token: vendor.accessToken });
+  smoke.categoryId = null;
+  pass("store deletes its own category");
+
   console.log(`\nPASS: ${passes.length} checks`);
 } finally {
   for (const r of restore) {
@@ -294,6 +382,8 @@ try {
     }
   }
   if (smoke) {
+    if (smoke.couponCodes) await Coupon.deleteMany({ code: { $in: smoke.couponCodes } });
+    if (smoke.categoryId) await Category.deleteOne({ _id: smoke.categoryId });
     const orderIds = (await Order.find({ tenantId: smoke.tenant2._id }).select("_id")).map((o) => o._id);
     await Invoice.deleteMany({ orderId: { $in: orderIds } });
     await Order.deleteMany({ tenantId: smoke.tenant2._id });
