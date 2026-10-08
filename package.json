@@ -8,10 +8,17 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "dev": "nodemon src/server.js",
+    "dev": "node --watch src/server.js",
     "seed": "node src/seeds/run.js",
     "test:checkout": "node src/tests/checkoutConcurrency.js",
-    "test:smoke": "node src/tests/e2eSmoke.js"
+    "test:smoke": "node src/tests/e2eSmoke.js",
+    "test:auth": "node src/tests/authPlatform.js",
+    "test:commerce": "node src/tests/commerceFlows.js && node src/tests/commerceHttp.js && node src/tests/commerceLedger.js",
+    "test:commerce:seed": "node src/tests/commerceSeed.js",
+    "test:platform": "node src/tests/platformFixes.js",
+    "test:catalog": "node src/tests/catalogFixes.js && node src/tests/catalogHttp.js",
+    "migrate:reservations": "node src/modules/inventory/migrateReservations.js",
+    "migrate:catalog": "node src/modules/catalog/migrate.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
@@ -24,12 +31,10 @@
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^8.18.0",
     "multer": "^2.3.0",
-    "nanoid": "5.1.6",
+    "nanoid": "^5.1.16",
     "node-cron": "^4.6.0",
+    "nodemailer": "^10.0.15",
     "socket.io": "^4.8.3",
     "zod": "^4.5.4"
-  },
-  "devDependencies": {
-    "nodemon": "^3.1.10"
   }
 }

@@ -4,15 +4,7 @@ import { Tenant } from "../tenants/tenant.model.js";
 import { paginate, paginated } from "../../utils/pagination.js";
 import { AppError } from "../../utils/AppError.js";
 import { IMPORTANT_EVENTS, ANALYTICS_CATEGORIES } from "./events.catalog.js";
-
-function parseBound(value, endOfDay) {
-  if (!value) return null;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    return new Date(`${value}T${endOfDay ? "23:59:59.999" : "00:00:00.000"}`);
-  }
-  const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? null : d;
-}
+import { parseBound, dayList, BUSINESS_TZ } from "../reports/time.js";
 
 function range(query) {
   const to = parseBound(query.to, true) || new Date();
@@ -21,12 +13,14 @@ function range(query) {
     throw new AppError(400, "Invalid from/to date", "VALIDATION_ERROR");
   }
   if (from > to) throw new AppError(400, "from must be before to", "VALIDATION_ERROR");
+  if (to - from > 400 * 86400000) throw new AppError(400, "Range too large (max 400 days)", "VALIDATION_ERROR");
   return { from, to };
 }
 
 function tenantScope(req) {
   if (req.isPlatformAdmin && !req.tenantId) return {};
-  return { tenantId: req.tenantId || req.user?.tenantId || null };
+  if (!req.tenantId) throw new AppError(403, "Tenant context required", "FORBIDDEN");
+  return { tenantId: req.tenantId };
 }
 
 function queryFilters(req, { daily = false } = {}) {
@@ -36,17 +30,6 @@ function queryFilters(req, { daily = false } = {}) {
   if (!daily && req.query.importance) extra.importance = req.query.importance;
   if (!daily && req.query.userId) extra.userId = req.query.userId;
   return extra;
-}
-
-function dayList(from, to) {
-  const days = [];
-  const cur = new Date(Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate()));
-  const end = new Date(Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate()));
-  while (cur <= end) {
-    days.push(cur.toISOString().slice(0, 10));
-    cur.setUTCDate(cur.getUTCDate() + 1);
-  }
-  return days;
 }
 
 export function catalog() {
@@ -103,6 +86,7 @@ export async function overview(req) {
   return {
     from,
     to,
+    timezone: BUSINESS_TZ,
     totals: { events, amount, days: days.length },
     byEvent,
     byCategory,

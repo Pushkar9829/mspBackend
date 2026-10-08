@@ -2,18 +2,19 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
-import path from "path";
-import mongoose from "mongoose";
-import { env, isOriginAllowed } from "./config/env.js";
-import { requestId } from "./middleware/requestId.js";
+import { isOriginAllowed } from "./config/env.js";
+import { requestId, requestLogger } from "./middleware/requestId.js";
 import { notFound, errorHandler } from "./middleware/error.js";
+import { mountPlatformRoutes } from "./middleware/platform.js";
 import v1 from "./routes/v1.js";
 
 export function createApp() {
   const app = express();
   app.set("trust proxy", 1);
+  app.disable("x-powered-by");
 
   app.use(requestId);
+  app.use(requestLogger);
   app.use(
     helmet({
       crossOriginResourcePolicy: { policy: "cross-origin" },
@@ -22,8 +23,7 @@ export function createApp() {
   app.use(
     cors({
       origin(origin, callback) {
-        if (isOriginAllowed(origin)) return callback(null, true);
-        return callback(null, false);
+        callback(null, isOriginAllowed(origin));
       },
       credentials: true,
       allowedHeaders: [
@@ -32,22 +32,23 @@ export function createApp() {
         "X-Tenant-Id",
         "X-Guest-Key",
         "Idempotency-Key",
+        "X-Client",
+        "X-Request-Id",
       ],
+      exposedHeaders: ["X-Request-Id", "Retry-After", "X-Export-Truncated", "X-Export-Total", "X-Export-Limit", "Content-Disposition", "X-Has-More", "X-Next-Before"],
     })
   );
-  app.use(express.json({ limit: "2mb" }));
+  app.use(
+    express.json({
+      limit: "2mb",
+      verify(req, _res, buf) {
+        if (req.originalUrl?.includes("/checkout/razorpay/webhook")) req.rawBody = buf;
+      },
+    })
+  );
   app.use(cookieParser());
-  app.use("/uploads", express.static(path.resolve(process.cwd(), env.uploadDir)));
 
-  app.get("/api/health", (_req, res) => {
-    res.json({
-      ok: true,
-      service: "mspNode",
-      requestId: _req.requestId,
-      time: new Date().toISOString(),
-      mongo: mongoose.connection.readyState === 1 ? "connected" : "disconnected",
-    });
-  });
+  mountPlatformRoutes(app);
 
   app.use("/api/v1", v1);
 

@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 
+/** Daily rollup per (IST day, tenant, event). Never expires. */
 const analyticsDailySchema = new mongoose.Schema(
   {
     day: { type: String, required: true },
@@ -12,8 +13,9 @@ const analyticsDailySchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// Platform-wide queries: day $in (+ event/category) → unique index prefix.
 analyticsDailySchema.index({ day: 1, tenantId: 1, event: 1 }, { unique: true });
-analyticsDailySchema.index({ day: 1, event: 1 });
+// Tenant-scoped queries.
 analyticsDailySchema.index({ tenantId: 1, day: 1 });
 
 export const AnalyticsDaily = mongoose.model("AnalyticsDaily", analyticsDailySchema);

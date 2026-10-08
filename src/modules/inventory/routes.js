@@ -25,6 +25,35 @@ const warehouseSchema = z.object({
   }),
 });
 
+const warehouseUpdateSchema = z.object({
+  params: z.object({ id: objectId }),
+  body: z
+    .object({
+      name: z.string().min(1).max(120).optional(),
+      code: z.string().min(1).max(40).optional(),
+      addressLine1: z.string().max(300).optional(),
+      city: z.string().max(120).optional(),
+      state: z.string().max(120).optional(),
+      postalCode: z.string().max(20).optional(),
+      country: z.string().max(60).optional(),
+      latitude: z.number().nullable().optional(),
+      longitude: z.number().nullable().optional(),
+      status: z.enum(["active", "inactive"]).optional(),
+    })
+    .strict(),
+});
+
+const thresholdSchema = z.object({
+  params: z.object({ id: objectId }),
+  body: z
+    .object({
+      lowStockThreshold: z.number().int().min(0).optional(),
+      incoming: z.number().int().min(0).optional(),
+    })
+    .strict()
+    .refine((b) => b.lowStockThreshold != null || b.incoming != null, { message: "lowStockThreshold or incoming is required" }),
+});
+
 const adjustSchema = z.object({
   body: z.object({
     warehouseId: objectId,
@@ -33,6 +62,18 @@ const adjustSchema = z.object({
     qty: z.number().int(),
     note: z.string().optional(),
   }),
+});
+
+const setQuantitySchema = z.object({
+  body: z
+    .object({
+      variantId: objectId,
+      warehouseId: objectId,
+      qty: z.number().int().min(0).max(10_000_000),
+      reason: z.enum(["set", "adjustment", "inward", "return"]).optional(),
+      note: z.string().max(500).optional(),
+    })
+    .strict(),
 });
 
 const transferSchema = z.object({
@@ -62,6 +103,7 @@ warehouseRouter.post(
 warehouseRouter.patch(
   "/:id",
   authorize("warehouses.edit"),
+  validate(warehouseUpdateSchema),
   audit("update", "warehouse"),
   asyncHandler(async (req, res) => {
     res.json(await service.updateWarehouse(req, req.params.id, req.body));
@@ -76,6 +118,9 @@ inventoryRouter.get("/", authorize("inventory.view"), asyncHandler(async (req, r
 inventoryRouter.get("/transactions", authorize("inventory.view"), asyncHandler(async (req, res) => {
   res.json(await service.listTransactions(req));
 }));
+inventoryRouter.get("/reservations", authorize("inventory.view"), asyncHandler(async (req, res) => {
+  res.json(await service.listReservations(req));
+}));
 inventoryRouter.post(
   "/adjust",
   authorize("inventory.adjust"),
@@ -83,6 +128,15 @@ inventoryRouter.post(
   audit("adjust", "inventory"),
   asyncHandler(async (req, res) => {
     res.json(await service.adjustStock(req, req.body));
+  })
+);
+inventoryRouter.post(
+  "/set-quantity",
+  authorize("inventory.adjust"),
+  validate(setQuantitySchema),
+  audit("set_quantity", "inventory"),
+  asyncHandler(async (req, res) => {
+    res.json(await service.setQuantity(req, req.body));
   })
 );
 inventoryRouter.post(
@@ -97,6 +151,7 @@ inventoryRouter.post(
 inventoryRouter.patch(
   "/:id",
   authorize("inventory.publish"),
+  validate(thresholdSchema),
   audit("publish", "inventory"),
   asyncHandler(async (req, res) => {
     res.json(await service.updateThresholds(req, req.params.id, req.body));

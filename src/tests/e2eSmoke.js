@@ -92,6 +92,14 @@ function checkGroupMath(quote) {
   pass("group totals = subtotal − coupon + fees (GST included, not added); coupon spread across lines");
 }
 
+// This script writes to the database directly. Refuse anything that isn't a throwaway test DB.
+{
+  const dbName = String(process.env.MONGODB_URI || "").split("/").pop().split("?")[0];
+  if (!dbName.includes("msp_test") && process.env.SMOKE_ALLOW_ANY_DB !== "true") {
+    console.error(`Refusing to run against database "${dbName}". Set MONGODB_URI to a *msp_test* database.`);
+    process.exit(1);
+  }
+}
 await connectDb();
 
 const restore = [];
@@ -153,7 +161,7 @@ try {
 
   const buyer = await req("/api/v1/auth/login", { method: "POST", body: { email: "buyer@acme.local", password: "Buyer123!" } });
   const vendor = await req("/api/v1/auth/login", { method: "POST", body: { email: "vendor@acme.local", password: "Vendor123!" } });
-  const admin = await req("/api/v1/auth/login", { method: "POST", body: { email: "admin@msp.local", password: "ChangeMe123!" } });
+  const admin = await req("/api/v1/auth/login", { method: "POST", body: { email: process.env.SUPER_ADMIN_EMAIL, password: process.env.SUPER_ADMIN_PASSWORD } });
   const B = buyer.accessToken;
 
   const resetCart = async () => {
@@ -198,15 +206,19 @@ try {
   ({ line } = findLine(quote, vRules._id, true));
   check(line?.qty === 12, "first add bumps to MOQ rounded up to the pack multiple (12)", line?.qty);
 
-  console.log("Same item as a regular line next to the bulk line");
-  quote = await req("/api/v1/cart/items", { method: "POST", token: B, body: { variantId: vRules._id, qty: 1 } });
-  const single = findLine(quote, vRules._id, false).line;
-  check(single?.qty === 1, "regular add of a bulk product keeps qty 1 in its own line", single?.qty);
-  check(findLine(quote, vRules._id, true).line?.qty === 12, "bulk line is untouched by the regular add");
-  check(!(single?.breakdown || []).some((s) => s.step === "tier") && !(single?.tierPrices || []).length, "regular line gets no slab price");
-  quote = await req(`/api/v1/cart/items/${single.cartItemId}`, { method: "PATCH", token: B, body: { qty: 3 } });
-  check(findLine(quote, vRules._id, false).line?.qty === 3, "regular line accepts qty 3 (no MOQ/pack rules)");
-  await req(`/api/v1/cart/items/${single.cartItemId}`, { method: "DELETE", token: B });
+  console.log("One line per variant (bulk is derived from the quantity)");
+  await expectFail(
+    "adding 1 more to the 12-unit bulk line breaks the pack multiple",
+    "/api/v1/cart/items",
+    { method: "POST", token: B, body: { variantId: vRules._id, qty: 1 } },
+    { status: 400, code: "PACK_MULTIPLE" }
+  );
+  quote = await req(`/api/v1/cart/items/${line.cartItemId}`, { method: "PATCH", token: B, body: { qty: 3 } });
+  const single = findLine(quote, vRules._id).line;
+  check(single?.qty === 3 && single.bulk === false, "below the bulk range the same line is a regular purchase (qty 3)", single);
+  check(!(single?.breakdown || []).some((s) => s.step === "tier"), "regular-range qty gets no slab price");
+  quote = await req(`/api/v1/cart/items/${line.cartItemId}`, { method: "PATCH", token: B, body: { qty: 12 } });
+  check(findLine(quote, vRules._id, true).line?.qty === 12, "back to 12: bulk again");
   await expectFail(
     "bulk add of a non-bulk product rejected",
     "/api/v1/cart/items",
@@ -215,7 +227,6 @@ try {
   );
   await expectFail("qty 15 rejected", `/api/v1/cart/items/${line.cartItemId}`, { method: "PATCH", token: B, body: { qty: 15 } }, { status: 400, code: "PACK_MULTIPLE" });
   await expectFail("qty 66 rejected", `/api/v1/cart/items/${line.cartItemId}`, { method: "PATCH", token: B, body: { qty: 66 } }, { status: 400, code: "MAX_QTY" });
-  await expectFail("qty 6 rejected", `/api/v1/cart/items/${line.cartItemId}`, { method: "PATCH", token: B, body: { qty: 6 } }, { status: 400, code: "MOQ" });
   quote = await req("/api/v1/cart", { token: B });
   check(findLine(quote, vRules._id, true).line.qty === 12, "rejected updates leave the cart unchanged");
   {
@@ -324,7 +335,7 @@ try {
   check(near(invA.totals.grandTotal, oAcme.total), "invoice total = order total (Acme)", [invA.totals.grandTotal, oAcme.total]);
   check(invA.supplyType === "intra" && invA.totals.igst === 0 && near(invA.totals.cgst + invA.totals.sgst, invA.totals.tax), "DL seller → DL buyer: CGST + SGST");
   check(invA.lines.some((l) => l.kind === "fee" && l.description === "Platform fee"), "platform fee appears as an invoice fee line");
-  check(invA.buyer.gstin === "07AAFCR4321K1Z2" && invA.seller.gstin === "07AABCA1234A1Z5", "buyer and seller GSTINs on the invoice", [invA.buyer.gstin, invA.seller.gstin]);
+  check(invA.buyer.gstin === "07AAFCR4321K1ZD" && invA.seller.gstin === "07AABCA1234A1ZL", "buyer and seller GSTINs on the invoice", [invA.buyer.gstin, invA.seller.gstin]);
 
   await req(`/api/v1/orders/${oSmoke._id}/status`, { method: "POST", token: admin.accessToken, body: { status: "confirmed" } });
   const invS = await req(`/api/v1/orders/${oSmoke._id}/invoice`, { token: admin.accessToken });

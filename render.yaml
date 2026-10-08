@@ -2,9 +2,121 @@ services:
   - type: web
     name: mspbackend
     runtime: node
+    # Free plan sleeps when idle: in-process cron stops while asleep. Use a paid plan, or point an
+    # external scheduler at /api/internal/cron/:name (Bearer CRON_SECRET).
     plan: free
-    buildCommand: npm ci
+    buildCommand: npm ci --omit=dev
     startCommand: npm start
+    healthCheckPath: /api/ready
     envVars:
       - key: NODE_VERSION
         value: "20"
+      - key: NODE_ENV
+        value: production
+      - key: SEED_ON_START
+        value: "false"
+      - key: SEED_DEMO
+        value: "false"
+      - key: SYNC_INDEXES
+        value: "true"
+      - key: REQUIRE_EMAIL_VERIFICATION
+        value: "true"
+      - key: COOKIE_SAMESITE
+        value: none
+      - key: COOKIE_SECURE
+        value: "true"
+      # Secrets / per-environment values: set in the Render dashboard.
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        sync: false
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: JWT_ACCESS_TTL
+        sync: false
+      - key: JWT_REFRESH_TTL
+        sync: false
+      - key: SUPER_ADMIN_EMAIL
+        sync: false
+      - key: SUPER_ADMIN_PASSWORD
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: API_URL
+        sync: false
+      - key: PUBLIC_API_URL
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: UPLOAD_DIR
+        sync: false
+      - key: MAPS_PROVIDER
+        sync: false
+      - key: MAPS_API_KEY
+        sync: false
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: MSG91_AUTH_KEY
+        sync: false
+      - key: MSG91_DLT_ENTITY_ID
+        sync: false
+      - key: MSG91_TEMPLATE_ID
+        sync: false
+      - key: DELHIVERY_TOKEN
+        sync: false
+      - key: DELHIVERY_BASE_URL
+        sync: false
+      - key: DELHIVERY_PICKUP_NAME
+        sync: false
+      - key: DELHIVERY_WEBHOOK_SECRET
+        sync: false
+      - key: ALLOW_NO_TRANSACTIONS
+        sync: false
+      - key: DISABLE_IN_PROCESS_JOBS
+        sync: false
+      - key: LOG_LEVEL
+        sync: false
+      - key: AUDIT_RETENTION_DAYS
+        sync: false
+      - key: MSG91_TEMPLATE_ORDER_PLACED
+        sync: false
+      - key: MSG91_TEMPLATE_ORDER_CONFIRMED
+        sync: false
+      - key: MSG91_TEMPLATE_ORDER_STATUS
+        sync: false
+      - key: MSG91_TEMPLATE_ORDER_SHIPPED
+        sync: false
+      - key: MSG91_TEMPLATE_ORDER_OUT_FOR_DELIVERY
+        sync: false
+      - key: MSG91_TEMPLATE_ORDER_DELIVERED
+        sync: false
+      - key: MSG91_TEMPLATE_ORDER_CANCELLED
+        sync: false
+      - key: MSG91_TEMPLATE_ORDER_REFUNDED
+        sync: false
+      - key: MSG91_TEMPLATE_PAYMENT_RECEIVED
+        sync: false
+      - key: MSG91_TEMPLATE_ACCOUNT_ALERT
+        sync: false
+      - key: NOTIFICATION_TTL_DAYS
+        sync: false
+      - key: NOTIFICATION_UNSUBSCRIBE_SECRET
+        sync: false
+      - key: ANALYTICS_RETENTION_DAYS
+        sync: false

@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import { Resolver } from "node:dns/promises";
 import { env } from "./env.js";
+import { allowNoTransactions, detectTransactionSupport } from "../utils/transaction.js";
 
 let connecting;
 
@@ -48,8 +49,9 @@ export async function connectDb() {
   if (mongoose.connection.readyState === 1) return mongoose.connection;
   if (!connecting) {
     connecting = connectWithFallback(env.mongoUri)
-      .then(() => {
+      .then(async () => {
         console.log("Connected to MongoDB");
+        await assertTransactionSupport();
         return mongoose.connection;
       })
       .catch((err) => {
@@ -60,10 +62,27 @@ export async function connectDb() {
   return connecting;
 }
 
-export function isReplicaSet() {
-  try {
-    return Boolean(mongoose.connection.client?.options?.replicaSet);
-  } catch {
-    return false;
+/**
+ * Commerce writes need multi-document transactions. Refuse to start on a standalone mongod
+ * unless ALLOW_NO_TRANSACTIONS=true (local development only) is set.
+ */
+async function assertTransactionSupport() {
+  const ok = await detectTransactionSupport(mongoose.connection);
+  if (ok) return;
+  if (allowNoTransactions()) {
+    console.warn(
+      "WARNING: MongoDB is not a replica set and ALLOW_NO_TRANSACTIONS=true. Commerce writes will NOT be " +
+        "transactional. Use this for local development only."
+    );
+    return;
   }
+  await mongoose.disconnect().catch(() => {});
+  throw new Error(
+    "MongoDB is not running as a replica set, so transactions are unavailable. Start mongod with " +
+      "--replSet (or use Atlas). For throwaway local development only, set ALLOW_NO_TRANSACTIONS=true."
+  );
+}
+
+export async function isReplicaSet() {
+  return detectTransactionSupport(mongoose.connection);
 }

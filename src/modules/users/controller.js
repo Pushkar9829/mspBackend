@@ -20,3 +20,7 @@ export const update = asyncHandler(async (req, res) => {
 export const remove = asyncHandler(async (req, res) => {
   res.json(await service.deleteUser(req, req.params.id));
 });
+
+export const signOutEverywhere = asyncHandler(async (req, res) => {
+  res.json(await service.signOutEverywhere(req, req.params.id));
+});

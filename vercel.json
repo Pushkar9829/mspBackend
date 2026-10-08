@@ -7,5 +7,12 @@
       "maxDuration": 30,
       "includeFiles": "src/**"
     }
-  }
+  },
+  "crons": [
+    { "path": "/api/internal/cron/reservation-timeout", "schedule": "*/5 * * * *" },
+    { "path": "/api/internal/cron/scheduled-publish", "schedule": "*/5 * * * *" },
+    { "path": "/api/internal/cron/low-stock", "schedule": "*/15 * * * *" },
+    { "path": "/api/internal/cron/retry-events", "schedule": "*/10 * * * *" },
+    { "path": "/api/internal/cron/cleanup", "schedule": "30 21 * * *" }
+  ]
 }

@@ -25,6 +25,8 @@ import analyticsRoutes from "../modules/analytics/routes.js";
 import settingsRoutes, { settingsPublicRouter } from "../modules/settings/routes.js";
 import searchRoutes from "../modules/search/routes.js";
 import ledgerRoutes from "../modules/ledger/routes.js";
+import wishlistRoutes from "../modules/wishlist/routes.js";
+import shippingRoutes from "../modules/shipping/routes.js";
 
 const v1 = Router();
 
@@ -59,5 +61,7 @@ v1.use("/settings", settingsPublicRouter);
 v1.use("/settings", settingsRoutes);
 v1.use("/search", searchRoutes);
 v1.use("/ledger", ledgerRoutes);
+v1.use("/wishlist", wishlistRoutes);
+v1.use("/shipping", shippingRoutes);
 
 export default v1;

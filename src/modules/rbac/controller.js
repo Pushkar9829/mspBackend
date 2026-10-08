@@ -2,7 +2,7 @@ import { asyncHandler } from "../../utils/asyncHandler.js";
 import * as service from "./service.js";
 
 export const listPermissions = asyncHandler(async (_req, res) => {
-  res.json(await service.listPermissions());
+  res.json(await service.listPermissions(_req));
 });
 
 export const listRoles = asyncHandler(async (req, res) => {

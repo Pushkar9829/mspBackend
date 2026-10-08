@@ -13,19 +13,37 @@ function assignRequestField(req, field, value) {
   }
 }
 
+const SEGMENTS = new Set(["body", "params", "query"]);
+
+/**
+ * Turn zod issues into { message, fields }. `message` keeps the first issue ("path: message"),
+ * `fields` maps EVERY failing path (dot-joined, without the body/params/query prefix) to its
+ * first message. Issues without a path are keyed "_".
+ */
+export function zodIssues(issues = [], { stripSegments = true } = {}) {
+  const fields = {};
+  let message = "Validation failed";
+  issues.forEach((issue, index) => {
+    const parts = (issue.path || []).filter((p, i) => !(stripSegments && i === 0 && SEGMENTS.has(p)));
+    const path = parts.join(".");
+    const key = path || "_";
+    if (!(key in fields)) fields[key] = issue.message;
+    if (index === 0) message = path ? `${path}: ${issue.message}` : issue.message;
+  });
+  return { message, fields };
+}
+
 export function validate(schema) {
   return (req, _res, next) => {
     const result = schema.safeParse({
-      body: req.body,
+      body: req.body ?? {},
       params: req.params,
       query: req.query,
     });
 
     if (!result.success) {
-      const issue = result.error.issues[0];
-      const path = issue.path.filter((p) => p !== "body" && p !== "params" && p !== "query").join(".");
-      const message = path ? `${path}: ${issue.message}` : issue.message;
-      return next(new AppError(400, message, "VALIDATION_ERROR"));
+      const { message, fields } = zodIssues(result.error.issues);
+      return next(new AppError(400, message, "VALIDATION_ERROR", { fields }));
     }
 
     req.validated = result.data;

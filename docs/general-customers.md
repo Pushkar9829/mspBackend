@@ -10,7 +10,7 @@ It does **not** cover the seller (`/tenant`) or company (`/super-admin`) panels.
 
 | Persona | How they use the shop |
 | --- | --- |
-| **Guest** | Browse, search, add to cart, save wishlist locally. Must sign in to check out. |
+| **Guest** | Browse, search, add to cart, save wishlist locally. Must sign in (and, in production, verify their email) to check out. |
 | **Buyer (registered customer)** | Full shopping account: profile, addresses, coupons, orders, support chat. |
 | **Retail / bulk buyer** | Same shop, plus bulk page, GST invoices, quantity slabs, optional purchase order at checkout (business roles only). |
 
@@ -97,7 +97,7 @@ Only the APIs the shop actually calls are listed. Staff-only routes in the same 
 | `/account/orders` · `/orders` | Order history | Yes |
 | `/account/addresses` | Saved addresses | Yes |
 | `/account/coupons` | Coupons for current bag | Yes |
-| `/account/wishlist` · `/wishlist` | Wishlist | No (stored in browser) |
+| `/account/wishlist` · `/wishlist` | Wishlist | No (guests: browser; buyers: synced to the server) |
 | `/account/support` | Support inbox | Yes |
 | `/account/help` · `/help` | Help centre | No |
 | `/legal` | Privacy & terms | No |
@@ -318,7 +318,7 @@ Buyers only see **their own** orders.
 
 ```
 GET   /api/v1/auth/me
-PATCH /api/v1/auth/me                 { name, phone }
+PATCH /api/v1/auth/me                 { name, phone, profile }
 POST  /api/v1/auth/change-password    { currentPassword, newPassword }
 
 GET    /api/v1/addresses
@@ -335,11 +335,14 @@ DELETE /api/v1/addresses/:id
 
 | Action | Fields | Backend |
 | --- | --- | --- |
-| Create account | Full name, email, password (min 8) | `POST /api/v1/auth/register` as **buyer** |
-| Sign in | Email, password | `POST /api/v1/auth/login` (rate limited, lockout after failed attempts) |
+| Create account | Full name, email, password (min 8) | `POST /api/v1/auth/register` as **buyer** (rate limited; same response whether or not the email already exists; sends a verification email) |
+| Verify email | Link from email (`/verify-email?token=`) | `POST /api/v1/auth/verify-email` · resend: `POST /api/v1/auth/resend-verification` |
+| Sign in | Email, password | `POST /api/v1/auth/login` (rate limited; after 5 failures a temporary, growing per-account delay — the account is never disabled and other sessions stay signed in) |
 | After login | Merge guest cart, return to previous page or checkout | `POST /api/v1/cart/merge` |
 
-Auth also supports refresh, logout, forgot/reset password on the API; the shop UI currently uses login, register, me, update me, and change password.
+Auth also supports refresh (httpOnly cookie, rotated, reuse detected), logout (works with an expired access token), logout from all devices, forgot/reset password, account data export and account deletion — see `docs/API.md`.
+
+Buyers are marketplace customers, not members of a store: registering through a store link (`tenantSlug`) only records that store as `homeTenantId`.
 
 ---
 
@@ -348,12 +351,11 @@ Auth also supports refresh, logout, forgot/reset password on the API; the shop U
 **UI:** `/wishlist`, heart on product cards and PDP, header badge.
 
 - Toggle save / unsave (no account required)
-- Stored in browser (`localStorage`)
+- Guests: stored in browser (`localStorage`)
+- Signed-in buyers: synced to the server (`GET/PUT /api/v1/wishlist`, `DELETE /api/v1/wishlist/:key`)
 - Missing items loaded via product lookup
 - Clear all
 - Add to cart from the card as usual
-
-Not synced to the server.
 
 ---
 
@@ -429,11 +431,11 @@ Shown across home, PDP, checkout, footer:
 | Browse, search, filter | ✓ | ✓ |
 | Product details & offers | ✓ | ✓ |
 | Add to cart | ✓ (guest key) | ✓ |
-| Wishlist | ✓ (local) | ✓ (local) |
+| Wishlist | ✓ (local) | ✓ (synced) |
 | Set PIN / city | ✓ (local) | ✓ (saved to profile) |
 | Apply coupons | — | ✓ |
 | Saved addresses | — | ✓ |
-| Checkout | redirected to login | ✓ |
+| Checkout | redirected to login | ✓ (verified email required in production) |
 | Orders & tracking | — | ✓ |
 | Profile & password | — | ✓ |
 | Support chat | — | ✓ |
@@ -447,7 +449,8 @@ Base: `/api/v1`. Unauthenticated catalog/cart calls send `X-Guest-Key`. Authenti
 
 | Area | Method & path |
 | --- | --- |
-| Auth | `POST /auth/register` · `POST /auth/login` · `GET /auth/me` · `PATCH /auth/me` · `POST /auth/change-password` |
+| Auth | `POST /auth/register` · `POST /auth/login` · `POST /auth/refresh` · `POST /auth/logout` · `POST /auth/logout-all` · `POST /auth/verify-email` · `POST /auth/resend-verification` · `GET /auth/me` · `PATCH /auth/me` · `GET /auth/me/export` · `DELETE /auth/me` · `POST /auth/change-password` · `POST /auth/forgot-password` · `POST /auth/reset-password` |
+| Wishlist | `GET /wishlist` · `PUT /wishlist` · `DELETE /wishlist/:key` |
 | Catalog | `GET /categories` · `GET /brands/public` · `GET /products/search` · `GET /products/lookup` |
 | Cart | `GET /cart` · `POST /cart/items` · `PATCH /cart/items/:id` · `DELETE /cart/items/:id` · `POST /cart/coupon` · `GET /cart/coupons` · `POST /cart/merge` |
 | Checkout | `POST /checkout/preview` · `POST /checkout` |
@@ -456,7 +459,7 @@ Base: `/api/v1`. Unauthenticated catalog/cart calls send `X-Guest-Key`. Authenti
 | Location | `PUT /location/me` |
 | CMS | `GET /cms/pages/:slug` |
 | Chat | `GET/POST /chat` · `GET /chat/:id/messages` · `POST /chat/:id/messages` · `POST /chat/:id/read` |
-| Health | `GET /api/health` |
+| Health | `GET /api/health` (liveness) · `GET /api/ready` (readiness, 503 if DB down) |
 
 ---
 

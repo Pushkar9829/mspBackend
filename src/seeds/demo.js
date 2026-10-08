@@ -10,7 +10,6 @@ import { ProductVariant } from "../modules/catalog/variant.model.js";
 import { Media } from "../modules/catalog/media.model.js";
 import { Warehouse } from "../modules/inventory/warehouse.model.js";
 import { Inventory } from "../modules/inventory/inventory.model.js";
-import { InventoryTransaction } from "../modules/inventory/transaction.model.js";
 import { Coupon } from "../modules/pricing/coupon.model.js";
 import { CouponUsage } from "../modules/pricing/couponUsage.model.js";
 import { Offer } from "../modules/pricing/offer.model.js";
@@ -21,14 +20,19 @@ import { Order } from "../modules/orders/order.model.js";
 import { Conversation } from "../modules/chat/conversation.model.js";
 import { Message } from "../modules/chat/message.model.js";
 import { Notification } from "../modules/notifications/notification.model.js";
-import { CmsPage } from "../modules/cms/cmsPage.model.js";
+import { upsertSeedPage, HELP_SECTIONS, SHIPPING_HTML, REFUNDS_HTML, LEGACY_DEMO_GLOBAL } from "./cmsDefaults.js";
 import { AnalyticsEvent } from "../modules/analytics/event.model.js";
 import { AnalyticsDaily } from "../modules/analytics/daily.model.js";
 import { AuditLog } from "../modules/audit/auditLog.model.js";
 import { SYSTEM_ROLES } from "../config/constants.js";
 import { SALT } from "../modules/auth/service.js";
 import { IMPORTANT_EVENTS } from "../modules/analytics/events.catalog.js";
-import { ensureOpeningBalance } from "../modules/ledger/service.js";
+import mongoose from "mongoose";
+import { ensureOpeningBalance, findLedger, spendablePaise, debitOrder, applyEntry } from "../modules/ledger/service.js";
+import { CouponCustomerUse } from "../modules/pricing/couponUsage.model.js";
+import { setAvailableQty, reserve } from "../modules/inventory/service.js";
+import { confirmOrder, advanceOrder, cancelOrder, refundOrder } from "../modules/orders/lifecycle.js";
+import { withTransaction } from "../utils/transaction.js";
 import { allocateCoupon, splitInclusive, round2 } from "../modules/pricing/engine.js";
 
 /** Only these SKUs are sold in bulk; everything else is a normal one-at-a-time product. */
@@ -372,31 +376,27 @@ function dayKey(date) {
   return date.toISOString().slice(0, 10);
 }
 
-async function ensureUser({ email, password, ...fields }) {
+/**
+ * Create a demo user if absent. Existing accounts are left untouched (no password/status reset).
+ * Buyers are marketplace customers: `tenantId` is moved to `homeTenantId`.
+ */
+async function ensureUser({ email, password, buyer = false, ...fields }) {
   const lowered = email.toLowerCase();
   let user = await User.findOne({ email: lowered });
   if (!user) {
+    const doc = { ...fields };
+    if (buyer) {
+      doc.homeTenantId = doc.tenantId || null;
+      doc.tenantId = null;
+    }
     user = await User.create({
       email: lowered,
       passwordHash: await bcrypt.hash(password, SALT),
       status: "active",
-      ...fields,
+      emailVerified: true,
+      emailVerifiedAt: new Date(),
+      ...doc,
     });
-  } else {
-    const { password: _pw, ...rest } = { password, ...fields };
-    await User.updateOne(
-      { _id: user._id },
-      {
-        $set: {
-          ...rest,
-          status: "active",
-          passwordHash: await bcrypt.hash(password, SALT),
-          failedLoginAttempts: 0,
-          lockedUntil: null,
-        },
-      }
-    );
-    user = await User.findById(user._id);
   }
   return user;
 }
@@ -423,7 +423,7 @@ export async function seedDemoCatalog() {
         },
         businessProfile: {
           legalName: "Acme Wholesale Private Limited",
-          gstin: "07AABCA1234A1Z5",
+          gstin: "07AABCA1234A1ZL",
           email: "vendor@acme.local",
           phone: "01140001234",
           website: "https://acme.local",
@@ -511,7 +511,7 @@ export async function seedDemoCatalog() {
       name: "Demo Buyer",
       phone: "9999999999",
       company: "Retail Mart",
-      gstin: "07AAFCR4321K1Z2",
+      gstin: "07AAFCR4321K1ZD",
       city: "Delhi",
       state: "DL",
       postalCode: "110001",
@@ -534,7 +534,7 @@ export async function seedDemoCatalog() {
       name: "Meera Shah",
       phone: "9811100002",
       company: "City Foods",
-      gstin: "27AACCC5678L1Z9",
+      gstin: "27AACCC5678L1Z5",
       city: "Mumbai",
       state: "MH",
       postalCode: "400001",
@@ -567,6 +567,7 @@ export async function seedDemoCatalog() {
   const buyers = {};
   for (const spec of buyersSpec) {
     buyers[spec.email] = await ensureUser({
+      buyer: true,
       email: spec.email,
       password: spec.password,
       name: spec.name,
@@ -789,41 +790,43 @@ export async function seedDemoCatalog() {
       { warehouse: mumbai, available: Math.round(base * 0.3), threshold: 10 },
     ];
     for (const row of rows) {
-      const inv = await Inventory.findOneAndUpdate(
-        { tenantId: tenant._id, warehouseId: row.warehouse._id, variantId: variant._id },
-        {
-          $set: {
-            sku: variant.sku,
-            available: row.available,
-            reserved: 0,
-            committed: 0,
-            damaged: 0,
-            incoming: 40,
-            lowStockThreshold: row.threshold,
+      // Counters (available / reserved / committed) are owned by the inventory service: only the
+      // first run sets stock (through setAvailableQty, which writes the transaction); later runs
+      // leave live counters alone so they keep matching the reservation documents.
+      const filter = { tenantId: tenant._id, warehouseId: row.warehouse._id, variantId: variant._id };
+      const existed = await Inventory.exists(filter);
+      await Inventory.updateOne(
+        filter,
+        [
+          {
+            $set: {
+              sku: variant.sku,
+              available: { $ifNull: ["$available", 0] },
+              reserved: { $ifNull: ["$reserved", 0] },
+              committed: { $ifNull: ["$committed", 0] },
+              damaged: { $ifNull: ["$damaged", 0] },
+              incoming: 40,
+              lowStockThreshold: row.threshold,
+            },
           },
-        },
-        { upsert: true, new: true }
+          {
+            $set: {
+              isLow: {
+                $or: [{ $lte: ["$available", 0] }, { $and: [{ $gt: ["$lowStockThreshold", 0] }, { $lte: ["$available", "$lowStockThreshold"] }] }],
+              },
+            },
+          },
+        ],
+        { upsert: true }
       );
-      const existingTx = await InventoryTransaction.findOne({
-        tenantId: tenant._id,
-        warehouseId: row.warehouse._id,
-        variantId: variant._id,
-        reason: "inward",
-        reference: "SEED-INWARD",
-      });
-      if (!existingTx) {
-        await InventoryTransaction.create({
+      if (!existed) {
+        await setAvailableQty({
           tenantId: tenant._id,
-          warehouseId: row.warehouse._id,
           variantId: variant._id,
-          sku: variant.sku,
-          reason: "inward",
+          warehouseId: row.warehouse._id,
           qty: row.available,
-          availableAfter: inv.available,
-          reservedAfter: 0,
-          committedAfter: 0,
-          actorId: tenantAdmin._id,
-          reference: "SEED-INWARD",
+          userId: tenantAdmin._id,
+          reason: "inward",
           note: "Initial demo stock",
         });
       }
@@ -911,13 +914,13 @@ export async function seedDemoCatalog() {
         value: 10,
         minCartValue: 1000,
         maxRedemptions: 10000,
-        redemptionCount: 1,
         perCustomerLimit: 100,
         excludedProductIds: [],
         status: "active",
         startsAt: new Date(Date.now() - 86400000),
         endsAt: new Date(Date.now() + 365 * 86400000),
       },
+      $setOnInsert: { redemptionCount: 0 },
     },
     { upsert: true, new: true }
   );
@@ -930,7 +933,6 @@ export async function seedDemoCatalog() {
         value: 50,
         minCartValue: 5000,
         maxRedemptions: 500,
-        redemptionCount: 0,
         perCustomerLimit: 5,
         excludedProductIds: [],
         status: "active",
@@ -949,7 +951,6 @@ export async function seedDemoCatalog() {
         value: 5,
         minCartValue: 0,
         maxRedemptions: 10000,
-        redemptionCount: 0,
         perCustomerLimit: 50,
         excludedProductIds: [],
         status: "active",
@@ -1017,6 +1018,8 @@ export async function seedDemoCatalog() {
       variantId: d.variant._id,
       sku: d.variant.sku,
       name: d.product.name,
+      slug: d.product.slug || "",
+      image: d.product.images?.[0] || "",
       hsn: d.product.hsn || "",
       attributes: d.variant.attributes,
       qty,
@@ -1038,15 +1041,38 @@ export async function seedDemoCatalog() {
     { number: "MSR10204", email: "cityfoods@acme.local", status: "confirmed", amountHint: 8720, daysAgo: 2 },
     { number: "MSR10191", email: "dailyneeds@acme.local", status: "pending", amountHint: 2140, daysAgo: 3 },
     { number: "MSR10170", email: "metromart@acme.local", status: "cancelled", amountHint: 6400, daysAgo: 4 },
+    { number: "MSR10162", email: "kirana@acme.local", status: "refunded", amountHint: 2600, daysAgo: 6 },
   ];
 
-  const seededOrders = [];
-  for (const [idx, def] of orderDefs.entries()) {
+  /** Line qty capped to what the fullest live warehouse row can hold for this order. */
+  async function seedLine(d, desiredQty) {
+    const rows = await Inventory.find({ tenantId: tenant._id, variantId: d.variant._id, archived: { $ne: true } })
+      .sort({ available: -1 })
+      .lean();
+    const best = rows[0];
+    if (!best || best.available < 2) return null;
+    const qty = Math.max(1, Math.min(desiredQty, Math.floor(best.available / 2)));
+    return line(d, qty, best.warehouseId);
+  }
+
+  /**
+   * Seed orders go through the same services as real ones: stock is reserved per line (owned
+   * reservation, counters move with it), purchase orders debit the buyer's ledger, and the
+   * lifecycle (confirm / ship / deliver / cancel / refund) commits stock, issues invoices and
+   * credit notes and reverses ledger debits. Existing seed orders are left as they are.
+   */
+  async function createSeedOrder(def, idx) {
     const user = buyers[def.email];
     const addr = addressByEmail[def.email];
-    const pick = defaultVariants.slice(idx, idx + 3);
+    const start = idx % Math.max(1, defaultVariants.length - 2);
+    const pick = defaultVariants.slice(start, start + 3);
     const qty = Math.max(10, Math.round(def.amountHint / (pick[0]?.selling || 200)));
-    const items = pick.map((d, i) => line(d, Math.max(10, Math.round(qty / (i + 1))), delhi._id));
+    const items = [];
+    for (const [i, d] of pick.entries()) {
+      const row = await seedLine(d, Math.max(10, Math.round(qty / (i + 1))));
+      if (row) items.push({ ...row, _id: new mongoose.Types.ObjectId() });
+    }
+    if (!items.length) return null;
     const subtotal = round2(items.reduce((s, it) => s + it.lineSubtotal, 0));
     const couponDiscount = def.coupon ? Math.round(subtotal * 0.1) : 0;
     allocateCoupon(items, couponDiscount, null);
@@ -1054,82 +1080,157 @@ export async function seedDemoCatalog() {
     const taxableValue = round2(items.reduce((s, it) => s + it.taxableValue, 0));
     const deliveryFee = addr.city === "Mumbai" ? 80 : 0;
     const total = round2(subtotal - couponDiscount + deliveryFee);
-    const createdAt = new Date(Date.now() - def.daysAgo * 86400000);
-    const history = [{ status: "pending", at: createdAt, actorId: user._id, note: "Placed via seed" }];
-    if (def.status !== "pending") history.push({ status: def.status, at: new Date(createdAt.getTime() + 3600000), actorId: tenantAdmin._id, note: "Status update" });
-    const order = await Order.findOneAndUpdate(
-      { orderNumber: def.number },
-      {
-        $set: {
-          orderNumber: def.number,
+
+    // Purchase order on the buyer's credit line when it can cover the order, otherwise COD.
+    const account = await findLedger(user._id, tenant._id);
+    const poAllowed = account?.buyerTerms?.purchaseOrderEnabled && spendablePaise(account) >= Math.round(total * 100);
+    const paymentMethod = def.status === "cancelled" || !poAllowed ? "cod" : "purchase_order";
+    const orderId = new mongoose.Types.ObjectId();
+
+    await withTransaction(async (session) => {
+      const [order] = await Order.create(
+        [
+          {
+            _id: orderId,
+            orderNumber: def.number,
+            tenantId: tenant._id,
+            buyerId: user._id,
+            status: "pending",
+            items,
+            addressSnapshot: {
+              contactName: addr.contactName,
+              phone: addr.phone,
+              addressLine1: addr.addressLine1,
+              city: addr.city,
+              state: addr.state,
+              postalCode: addr.postalCode,
+              country: "IN",
+            },
+            couponCode: def.coupon || "",
+            couponDiscount,
+            subtotal,
+            taxableValue,
+            tax,
+            taxInclusive: true,
+            deliveryFee,
+            total,
+            buyerSnapshot: {
+              name: user.name,
+              company: user.profile?.company || "",
+              email: user.email,
+              phone: user.phone || addr.phone || "",
+              gstin: user.profile?.gstin || "",
+            },
+            sellerSnapshot: {
+              name: tenant.name,
+              legalName: tenant.businessProfile?.legalName || tenant.name,
+              gstin: tenant.businessProfile?.gstin || "",
+              state: tenant.pickupAddress?.state || "",
+              postalCode: tenant.pickupAddress?.postalCode || "",
+              address: tenant.pickupAddress?.formatted || "",
+              email: tenant.businessProfile?.email || "",
+              phone: tenant.businessProfile?.phone || "",
+            },
+            paymentMethod,
+            paymentStatus: "unpaid",
+            poNumber: paymentMethod === "purchase_order" ? `PO-${def.number}` : "",
+            buyerNotes: "Please deliver before noon if possible.",
+            sellerNotes: "",
+            ledgerDebit: 0,
+            idempotencyKey: `seed-${def.number}`,
+            statusHistory: [{ status: "pending", actorId: user._id, note: "Placed via seed" }],
+          },
+        ],
+        { session }
+      );
+      for (const item of items) {
+        await reserve({
           tenantId: tenant._id,
-          buyerId: user._id,
-          status: def.status,
-          items,
-          addressSnapshot: {
-            contactName: addr.contactName,
-            phone: addr.phone,
-            addressLine1: addr.addressLine1,
-            city: addr.city,
-            state: addr.state,
-            postalCode: addr.postalCode,
-            country: "IN",
-          },
-          couponCode: def.coupon || "",
-          couponDiscount,
-          subtotal,
-          taxableValue,
-          tax,
-          taxInclusive: true,
-          deliveryFee,
-          total,
-          buyerSnapshot: {
-            name: user.name,
-            company: user.profile?.company || "",
-            email: user.email,
-            phone: user.phone || addr.phone || "",
-            gstin: user.profile?.gstin || "",
-          },
-          sellerSnapshot: {
-            name: tenant.name,
-            legalName: tenant.businessProfile?.legalName || tenant.name,
-            gstin: tenant.businessProfile?.gstin || "",
-            state: tenant.pickupAddress?.state || "",
-            address: tenant.pickupAddress?.formatted || "",
-            email: tenant.businessProfile?.email || "",
-            phone: tenant.businessProfile?.phone || "",
-          },
-          paymentMethod: def.status === "cancelled" ? "cod" : "purchase_order",
-          paymentStatus: def.status === "delivered" ? "paid" : def.status === "cancelled" ? "failed" : "pending",
-          poNumber: `PO-${def.number}`,
-          buyerNotes: "Please deliver before noon if possible.",
-          sellerNotes: "",
-          idempotencyKey: `seed-${def.number}`,
-          etaFrom: new Date(createdAt.getTime() + 86400000),
-          etaTo: new Date(createdAt.getTime() + 4 * 86400000),
-          statusHistory: history,
-          fulfillments:
-            def.status === "shipped" || def.status === "delivered"
-              ? [{ carrier: "Delhivery", trackingNumber: `DLV${def.number}`, shippedAt: createdAt }]
-              : [],
-        },
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
-    if (order.createdAt - createdAt > 60000) {
-      await Order.updateOne({ _id: order._id }, { $set: { createdAt } });
+          warehouseId: item.warehouseId,
+          variantId: item.variantId,
+          qty: item.qty,
+          owner: { type: "order", id: orderId, line: item._id },
+          reference: def.number,
+          actorId: user._id,
+          session,
+        });
+      }
+      if (def.coupon && couponDiscount > 0) {
+        const coupon = await Coupon.findOne({ tenantId: tenant._id, code: def.coupon }).session(session);
+        if (coupon) {
+          await Coupon.updateOne({ _id: coupon._id }, { $inc: { redemptionCount: 1 } }, { session });
+          await CouponCustomerUse.findOneAndUpdate(
+            { couponId: coupon._id, userId: user._id },
+            { $inc: { count: 1 }, $setOnInsert: { tenantId: tenant._id } },
+            { upsert: true, session }
+          );
+          await CouponUsage.create([{ tenantId: tenant._id, couponId: coupon._id, userId: user._id, orderId }], { session });
+        }
+      }
+      await debitOrder(order, { session });
+    });
+
+    let order = await Order.findById(orderId);
+    const actor = tenantAdmin._id;
+    const forward = async (steps) => {
+      for (const step of steps) {
+        order = await advanceOrder(order, step, {
+          actorId: actor,
+          note: "Seed",
+          ...(step === "ready_to_ship" ? { trackingNumber: `DLV${def.number}`, carrier: "Delhivery" } : {}),
+        });
+      }
+    };
+    if (def.status === "cancelled") {
+      order = await cancelOrder(order, actor, "Cancelled by seller (seed)");
+    } else if (def.status !== "pending") {
+      order = await confirmOrder(order, actor);
+      if (def.status === "shipped") await forward(["processing", "ready_to_ship", "shipped"]);
+      if (def.status === "delivered" || def.status === "refunded") {
+        await forward(["processing", "ready_to_ship", "shipped", "out_for_delivery", "delivered"]);
+      }
+      if (def.status === "delivered" && order.paymentMethod === "purchase_order") {
+        // The buyer settled the purchase order: payment against the ledger, order marked paid.
+        await applyEntry({
+          userId: user._id,
+          tenantId: tenant._id,
+          type: "credit",
+          kind: "payment",
+          amount: order.total,
+          reference: `SEED-PAY-${def.number}`,
+          note: `Payment for ${def.number}`,
+          actorId: actor,
+        });
+        await Order.updateOne({ _id: orderId }, { $set: { paymentStatus: "paid", paidAt: new Date() } });
+      }
+      if (def.status === "refunded") {
+        order = await refundOrder(order, actor, "Damaged in transit (seed)");
+      }
     }
-    seededOrders.push(order);
+
+    // Backdate the order and its history so the demo has a timeline (createdAt is immutable in
+    // Mongoose, so write through the driver).
+    const createdAt = new Date(Date.now() - def.daysAgo * 86400000);
+    const fresh = await Order.findById(orderId).lean();
+    const history = (fresh.statusHistory || []).map((h, i) => ({ ...h, at: new Date(createdAt.getTime() + i * 3600000) }));
+    const set = { createdAt, statusHistory: history, etaFrom: new Date(createdAt.getTime() + 86400000), etaTo: new Date(createdAt.getTime() + 4 * 86400000) };
+    if (fresh.deliveredAt) set.deliveredAt = history.find((h) => h.status === "delivered")?.at || fresh.deliveredAt;
+    await Order.collection.updateOne({ _id: orderId }, { $set: set });
+    return Order.findById(orderId);
+  }
+
+  const seededOrders = [];
+  for (const [idx, def] of orderDefs.entries()) {
+    const existing = await Order.findOne({ orderNumber: def.number });
+    if (existing) {
+      seededOrders.push(existing);
+      continue;
+    }
+    const created = await createSeedOrder(def, idx);
+    if (created) seededOrders.push(created);
   }
 
   const delivered = seededOrders.find((o) => o.orderNumber === "MSR10231");
-  if (delivered) {
-    await CouponUsage.findOneAndUpdate(
-      { tenantId: tenant._id, couponId: welcome._id, userId: buyer._id, orderId: delivered._id },
-      { $set: { tenantId: tenant._id, couponId: welcome._id, userId: buyer._id, orderId: delivered._id } },
-      { upsert: true }
-    );
-  }
 
   const convo = await Conversation.findOneAndUpdate(
     { tenantId: tenant._id, buyerId: buyer._id, subject: "Order MSR10231 delivery window" },
@@ -1199,6 +1300,10 @@ export async function seedDemoCatalog() {
     );
   }
 
+  // Seeded CMS pages go through upsertSeedPage: unedited seed pages are refreshed, pages an admin
+  // edited are left alone. Delivery / support / return facts are {{tokens}} filled from settings
+  // when the page is served (cms/render.js), never hard-coded.
+  const OLD_STORE_SHIPPING = { title: "Shipping policy", sections: [{ kind: "html", html: "<p>Delhi NCR 1–3 days. Rest of India 4–8 days.</p>" }] };
   const cmsPages = [
     {
       slug: "home",
@@ -1209,51 +1314,22 @@ export async function seedDemoCatalog() {
     { slug: "faq", title: "FAQ", type: "faq", sections: [{ kind: "faq", q: "What is MOQ?", a: "Most SKUs start at 10 units." }] },
     { slug: "terms", title: "Terms of sale", type: "terms", sections: [{ kind: "html", html: "<p>Standard wholesale terms apply.</p>" }] },
     { slug: "privacy", title: "Privacy policy", type: "privacy", sections: [{ kind: "html", html: "<p>We store order and KYC data securely.</p>" }] },
-    { slug: "shipping", title: "Shipping policy", type: "shipping", sections: [{ kind: "html", html: "<p>Delhi NCR 1–3 days. Rest of India 4–8 days.</p>" }] },
-  ];
-  for (const page of cmsPages) {
-    await CmsPage.findOneAndUpdate(
-      { tenantId: tenant._id, slug: page.slug },
-      {
-        $set: {
-          tenantId: tenant._id,
-          slug: page.slug,
-          title: page.title,
-          type: page.type,
-          status: "published",
-          sections: page.sections,
-          seo: { title: page.title, description: page.title, canonical: `/${page.slug}` },
-          scheduledAt: null,
-          publishedAt: new Date(),
-        },
-      },
-      { upsert: true }
-    );
-  }
-
-  const platformCms = [
-    {
-      slug: "help",
-      title: "Help Centre",
-      type: "faq",
-      sections: [
-        { kind: "faq", q: "How long does shipping take?", a: "Metro pincodes typically arrive in 1–3 days. Bulk orders may ship from the nearest warehouse." },
-        { kind: "faq", q: "How do returns work?", a: "Unused, sealed packs can be returned within 7 days. Refunds go to the original payment method." },
-        { kind: "faq", q: "How do I contact support?", a: "Email support@msrmarket.local · Mon–Sat, 9am–7pm." },
-      ],
-    },
     {
       slug: "shipping",
       title: "Shipping policy",
       type: "shipping",
-      sections: [{ kind: "html", html: "<p>Orders in metro pincodes typically arrive in 1–3 days. Bulk orders may ship from the nearest warehouse.</p>" }],
+      sections: [{ kind: "html", html: "<p>Orders from this store typically arrive in {{etaDays}} days, depending on your PIN code. Checkout shows the estimate and delivery charges for your address.</p>" }],
+      legacy: [OLD_STORE_SHIPPING],
     },
-    {
-      slug: "returns",
-      title: "Returns & refunds",
-      type: "custom",
-      sections: [{ kind: "html", html: "<p>Unused, sealed packs can be returned within 7 days. Refunds are processed to the original payment method.</p>" }],
-    },
+  ];
+  for (const page of cmsPages) {
+    await upsertSeedPage({ tenantId: tenant._id, slug: page.slug }, page, { source: "demo", legacy: page.legacy || [] });
+  }
+
+  const platformCms = [
+    { slug: "help", title: "Help Centre", type: "faq", sections: HELP_SECTIONS },
+    { slug: "shipping", title: "Shipping policy", type: "shipping", sections: [{ kind: "html", html: SHIPPING_HTML }] },
+    { slug: "returns", title: "Returns & refunds", type: "policy", sections: [{ kind: "html", html: REFUNDS_HTML }] },
     {
       slug: "terms",
       title: "Terms & conditions",
@@ -1268,23 +1344,12 @@ export async function seedDemoCatalog() {
     },
   ];
   for (const page of platformCms) {
-    await CmsPage.findOneAndUpdate(
-      { tenantId: null, slug: page.slug },
-      {
-        $set: {
-          tenantId: null,
-          slug: page.slug,
-          title: page.title,
-          type: page.type,
-          status: "published",
-          sections: page.sections,
-          seo: { title: page.title, description: page.title, canonical: `/${page.slug}` },
-          scheduledAt: null,
-          publishedAt: new Date(),
-        },
-      },
-      { upsert: true }
-    );
+    // The demo may take over unedited default pages (seedSource "defaults"), never edited ones.
+    await upsertSeedPage({ tenantId: null, slug: page.slug }, page, {
+      source: "demo",
+      takeOver: ["defaults"],
+      legacy: LEGACY_DEMO_GLOBAL[page.slug] || [],
+    });
   }
 
   const eventCount = await AnalyticsEvent.countDocuments({ tenantId: tenant._id, requestId: "seed" });

@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { authenticate } from "../../middleware/authenticate.js";
-import { authorize } from "../../middleware/authorize.js";
+import { authorize, authorizeAny } from "../../middleware/authorize.js";
 import { resolveTenant, requireTenant } from "../../middleware/tenantScope.js";
 import { validate } from "../../middleware/validate.js";
 import { audit } from "../../middleware/audit.js";
@@ -10,6 +10,9 @@ import {
   createPriceListSchema,
   createOfferSchema,
   createCouponSchema,
+  updatePriceListSchema,
+  updateOfferSchema,
+  updateCouponSchema,
   idParamSchema,
 } from "./validators.js";
 
@@ -31,7 +34,7 @@ pricingRouter.post(
 pricingRouter.patch(
   "/:id",
   authorize("pricing.edit"),
-  validate(idParamSchema),
+  validate(updatePriceListSchema),
   audit("update", "priceList"),
   asyncHandler(async (req, res) => {
     res.json(await service.updatePriceList(req, req.params.id, req.body));
@@ -47,13 +50,16 @@ pricingRouter.post(
   })
 );
 
+// A platform admin may list and approve offers across tenants without X-Tenant-Id; every other
+// route (and every non-platform caller) needs a tenant context.
 export const offerRouter = Router();
-offerRouter.use(authenticate, resolveTenant, requireTenant);
+offerRouter.use(authenticate, resolveTenant, (req, res, next) => (req.isPlatformAdmin ? next() : requireTenant(req, res, next)));
 offerRouter.get("/", authorize("pricing.view"), asyncHandler(async (req, res) => {
   res.json(await service.listOffers(req));
 }));
 offerRouter.post(
   "/",
+  requireTenant,
   authorize("offers.create"),
   validate(createOfferSchema),
   audit("create", "offer"),
@@ -63,8 +69,9 @@ offerRouter.post(
 );
 offerRouter.patch(
   "/:id",
+  requireTenant,
   authorize("offers.edit"),
-  validate(idParamSchema),
+  validate(updateOfferSchema),
   audit("update", "offer"),
   asyncHandler(async (req, res) => {
     res.json(await service.updateOffer(req, req.params.id, req.body));
@@ -96,8 +103,8 @@ couponRouter.post(
 );
 couponRouter.patch(
   "/:id",
-  authorize("coupons.disable"),
-  validate(idParamSchema),
+  authorizeAny("coupons.edit", "coupons.create"),
+  validate(updateCouponSchema),
   audit("update", "coupon"),
   asyncHandler(async (req, res) => {
     res.json(await service.updateCoupon(req, req.params.id, req.body));
@@ -110,5 +117,14 @@ couponRouter.post(
   audit("disable", "coupon"),
   asyncHandler(async (req, res) => {
     res.json(await service.disableCoupon(req, req.params.id));
+  })
+);
+couponRouter.post(
+  "/:id/enable",
+  authorizeAny("coupons.edit", "coupons.disable"),
+  validate(idParamSchema),
+  audit("enable", "coupon"),
+  asyncHandler(async (req, res) => {
+    res.json(await service.enableCoupon(req, req.params.id));
   })
 );

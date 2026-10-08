@@ -9,109 +9,90 @@ import {
   TENANT_ADMIN_PERMISSIONS,
   SUPPORT_AGENT_PERMISSIONS,
   BUYER_PERMISSIONS,
+  permissionInfo,
 } from "../config/constants.js";
 import { env } from "../config/env.js";
 import { SALT } from "../modules/auth/service.js";
+import { logger } from "../utils/logger.js";
+import { ensureDefaultCmsPages } from "./cmsDefaults.js";
 
-export async function seedFoundation() {
+const SYSTEM_ROLE_DEFS = [
+  {
+    slug: SYSTEM_ROLES.SUPER_ADMIN,
+    name: "Super Admin",
+    permissions: ["*"],
+    scope: "platform",
+    description: "Platform-wide access",
+  },
+  {
+    slug: SYSTEM_ROLES.TENANT_ADMIN,
+    name: "Tenant Admin",
+    permissions: TENANT_ADMIN_PERMISSIONS,
+    scope: "tenant",
+    description: "Full tenant operations",
+  },
+  {
+    slug: SYSTEM_ROLES.SUPPORT_AGENT,
+    name: "Support Agent",
+    permissions: SUPPORT_AGENT_PERMISSIONS,
+    scope: "tenant",
+    description: "Chat and order support",
+  },
+  {
+    slug: SYSTEM_ROLES.BUYER,
+    name: "Buyer",
+    permissions: BUYER_PERMISSIONS,
+    scope: "tenant",
+    description: "Marketplace buyer",
+  },
+];
+
+/**
+ * Permission catalog + system roles. System role permissions are code-defined and re-synced on
+ * every start (safe, idempotent). Runs on every boot.
+ */
+export async function ensureSystemRoles() {
   for (const key of PERMISSIONS) {
-    const [resource, action] = key.split(".");
-    await Permission.updateOne(
-      { key },
-      { $set: { key, resource, action, description: key } },
-      { upsert: true }
+    const { resource, action, description } = permissionInfo(key);
+    await Permission.updateOne({ key }, { $set: { key, resource, action, description } }, { upsert: true });
+  }
+  const out = {};
+  for (const def of SYSTEM_ROLE_DEFS) {
+    out[def.slug] = await Role.findOneAndUpdate(
+      { slug: def.slug, isSystem: true },
+      { $set: { ...def, tenantId: null, isSystem: true } },
+      { upsert: true, new: true }
     );
   }
+  return out;
+}
 
-  const superAdmin = await Role.findOneAndUpdate(
-    { slug: SYSTEM_ROLES.SUPER_ADMIN, isSystem: true },
-    {
-      $set: {
-        name: "Super Admin",
-        slug: SYSTEM_ROLES.SUPER_ADMIN,
-        tenantId: null,
-        permissions: ["*"],
-        isSystem: true,
-        scope: "platform",
-        description: "Platform-wide access",
-      },
-    },
-    { upsert: true, new: true }
-  );
+/**
+ * Foundation seed: system roles, the super admin (created ONLY if absent — an existing account's
+ * password, status and lockout are never touched), and default platform settings (insert-only).
+ */
+export async function seedFoundation() {
+  const roles = await ensureSystemRoles();
+  const superAdmin = roles[SYSTEM_ROLES.SUPER_ADMIN];
 
-  await Role.findOneAndUpdate(
-    { slug: SYSTEM_ROLES.TENANT_ADMIN, isSystem: true },
-    {
-      $set: {
-        name: "Tenant Admin",
-        slug: SYSTEM_ROLES.TENANT_ADMIN,
-        tenantId: null,
-        permissions: TENANT_ADMIN_PERMISSIONS,
-        isSystem: true,
-        scope: "tenant",
-        description: "Full tenant operations",
-      },
-    },
-    { upsert: true }
-  );
-
-  await Role.findOneAndUpdate(
-    { slug: SYSTEM_ROLES.SUPPORT_AGENT, isSystem: true },
-    {
-      $set: {
-        name: "Support Agent",
-        slug: SYSTEM_ROLES.SUPPORT_AGENT,
-        tenantId: null,
-        permissions: SUPPORT_AGENT_PERMISSIONS,
-        isSystem: true,
-        scope: "tenant",
-        description: "Chat and order support",
-      },
-    },
-    { upsert: true }
-  );
-
-  await Role.findOneAndUpdate(
-    { slug: SYSTEM_ROLES.BUYER, isSystem: true },
-    {
-      $set: {
-        name: "Buyer",
-        slug: SYSTEM_ROLES.BUYER,
-        tenantId: null,
-        permissions: BUYER_PERMISSIONS,
-        isSystem: true,
-        scope: "tenant",
-        description: "Wholesale buyer",
-      },
-    },
-    { upsert: true }
-  );
-
-  const existingAdmin = await User.findOne({ email: env.superAdminEmail.toLowerCase() });
-  const adminHash = await bcrypt.hash(env.superAdminPassword, SALT);
+  const email = env.superAdminEmail.toLowerCase();
+  const existingAdmin = await User.findOne({ email }).select("_id");
   if (!existingAdmin) {
-    await User.create({
-      name: "Super Admin",
-      email: env.superAdminEmail.toLowerCase(),
-      passwordHash: adminHash,
-      tenantId: null,
-      roleId: superAdmin._id,
-      status: "active",
-    });
-    console.log(`Seeded super admin ${env.superAdminEmail}`);
-  } else {
-    await User.updateOne(
-      { _id: existingAdmin._id },
-      {
-        $set: {
-          passwordHash: adminHash,
-          roleId: superAdmin._id,
-          status: "active",
-          failedLoginAttempts: 0,
-          lockedUntil: null,
-        },
-      }
-    );
+    try {
+      await User.create({
+        name: "Super Admin",
+        email,
+        passwordHash: await bcrypt.hash(env.superAdminPassword, SALT),
+        tenantId: null,
+        roleId: superAdmin._id,
+        status: "active",
+        emailVerified: true,
+        emailVerifiedAt: new Date(),
+      });
+      logger.info("Seeded super admin", { email });
+    } catch (err) {
+      if (err?.code !== 11000) throw err; // another instance created it concurrently
+    }
   }
 
   const platformSettings = [
@@ -123,15 +104,17 @@ export async function seedFoundation() {
     ["platform.slogan", "भाव भी भरोसा भी"],
   ];
   for (const [key, value] of platformSettings) {
-    await Settings.findOneAndUpdate(
+    await Settings.updateOne(
       { scope: "platform", tenantId: null, key },
-      { $set: { value } },
+      { $setOnInsert: { value } },
       { upsert: true }
     );
   }
+
+  // Global policy pages (grievance, terms, privacy, refunds, shipping, about): insert-only.
+  await ensureDefaultCmsPages();
 
   return { ok: true };
 }
 
 export { seedDemoCatalog } from "./demo.js";
-
