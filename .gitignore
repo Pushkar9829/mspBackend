@@ -5,3 +5,4 @@ npm-debug.log*
 uploads
 *.log
 .vercel
+uploads-private

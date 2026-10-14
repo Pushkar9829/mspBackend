@@ -6,6 +6,7 @@ import { resolveTenant } from "../../middleware/tenantScope.js";
 import { asyncHandler } from "../../utils/asyncHandler.js";
 import { validate } from "../../middleware/validate.js";
 import * as service from "./service.js";
+import { requireFeature } from "../billing/entitlements.js";
 import { ANALYTICS_CATEGORIES } from "./events.catalog.js";
 
 const querySchema = z.object({
@@ -24,7 +25,7 @@ const querySchema = z.object({
 });
 
 const router = Router();
-router.use(authenticate, resolveTenant, authorizeAny("analytics.view", "reports.view", "audit.view"), validate(querySchema));
+router.use(authenticate, resolveTenant, authorizeAny("analytics.view", "reports.view", "audit.view"), requireFeature("analytics"), validate(querySchema));
 
 router.get("/catalog", asyncHandler(async (_req, res) => {
   res.json(service.catalog());

@@ -8,7 +8,8 @@ import { AppError } from "../../utils/AppError.js";
 import { links } from "../../utils/links.js";
 import { persistAndPush } from "../notifications/service.js";
 import { sendMail } from "../notifications/mailer.js";
-import { findPublicProduct, variantStockMap, activeTenantIds } from "./service.js";
+import { findPublicProduct, variantStockMap, activeTenantIds, STOREFRONT_TENANT_STATUSES } from "./service.js";
+import { Tenant } from "../tenants/tenant.model.js";
 
 const CONFIRM_TTL_MS = 48 * 60 * 60 * 1000;
 const RESEND_AFTER_MS = 10 * 60 * 1000;
@@ -140,6 +141,9 @@ export async function notifyRestock({ tenantId = null, variantId } = {}) {
     "name sku slug tenantId"
   );
   if (!product) return { notified: 0 };
+  // Inactive (suspended/archived/pending) stores can't sell: keep the alerts unclaimed.
+  const store = await Tenant.findById(product.tenantId).select("status").lean();
+  if (!store || !STOREFRONT_TENANT_STATUSES.includes(store.status)) return { notified: 0 };
   if ((await currentStock(variant._id)) <= 0) return { notified: 0 };
 
   let notified = 0;

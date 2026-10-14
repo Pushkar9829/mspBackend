@@ -18,7 +18,17 @@
     "test:platform": "node src/tests/platformFixes.js",
     "test:catalog": "node src/tests/catalogFixes.js && node src/tests/catalogHttp.js",
     "migrate:reservations": "node src/modules/inventory/migrateReservations.js",
-    "migrate:catalog": "node src/modules/catalog/migrate.js"
+    "migrate:catalog": "node src/modules/catalog/migrate.js",
+    "test:phase1:platform": "node src/tests/phase1Platform.js",
+    "test:phase2:states": "node src/tests/phase2States.js",
+    "test:phase2:onboarding": "node src/tests/phase2Onboarding.js",
+    "test:phase3:billing": "node src/tests/phase3Billing.js",
+    "test:phase3:limits": "node src/tests/phase3Limits.js",
+    "test:phase4:payouts": "node src/tests/phase4Payouts.js",
+    "test:phase4:tax": "node src/tests/phase4Tax.js",
+    "test:phase5:fleet": "node src/tests/phase5Fleet.js",
+    "test:phase6:disputes": "node src/tests/phase6Disputes.js",
+    "test:phase6:sla": "node src/tests/phase6Sla.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

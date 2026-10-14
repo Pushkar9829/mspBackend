@@ -9,7 +9,12 @@ import { normalizeIndianState } from "../location/pincode.js";
 
 /** GST on delivery / platform / partner charges (services), included in the fee. */
 export { FEE_TAX_RATE };
-const FEE_SAC = { delivery: "996812", platform: "998599", partner: "996812" };
+export const FEE_SAC = { delivery: "996812", platform: "998599", partner: "996812" };
+/** Fees the platform invoices itself (split invoicing): platform fee + platform courier / partner fee. */
+export const PLATFORM_FEE_KEYS = ["partner", "platform"];
+/** Fees on the seller's own invoice (split invoicing): the seller's delivery charge. */
+export const SELLER_FEE_KEYS = ["delivery"];
+const ALL_FEE_KEYS = ["delivery", "partner", "platform"];
 export const INVOICEABLE = [
   "confirmed",
   "processing",
@@ -20,6 +25,7 @@ export const INVOICEABLE = [
   "return_requested",
   "return_approved",
   "returned",
+  "rto_in_transit",
   "returned_to_origin",
   "refunded",
 ];
@@ -83,17 +89,70 @@ export function supplyTypeFor(sellerState, buyerState, { sellerGstin = "", buyer
   return x === y ? "intra" : "inter";
 }
 
-function splitTax(tax, supplyType) {
+export function splitTax(tax, supplyType) {
   if (supplyType === "inter") return { cgst: 0, sgst: 0, igst: round2(tax) };
   const cgst = round2(tax / 2);
   return { cgst, sgst: round2(tax - cgst), igst: 0 };
 }
 
-function formatAddress(a = {}) {
+export function formatAddress(a = {}) {
   return [a.addressLine1, a.addressLine2, a.city, a.state, a.postalCode].filter(Boolean).join(", ");
 }
 
-export function buildInvoiceLines(order, supplyType) {
+/** Order fees as [key, description, gross] (gross = GST-inclusive amount, may be 0). */
+export function orderFees(order) {
+  return [
+    ["delivery", "Delivery charges", round2(order.deliveryFee || 0)],
+    ["partner", order.deliveryPartner?.name ? `Delivery partner (${order.deliveryPartner.name})` : "Delivery partner fee", round2(order.partnerFee || 0)],
+    ["platform", "Platform fee", round2(order.platformFee || 0)],
+  ];
+}
+
+/** One GST-inclusive fee line (18%, SAC per fee). */
+export function feeLine(key, description, gross, supplyType) {
+  const { taxableValue, tax } = splitInclusive(gross, FEE_TAX_RATE);
+  return {
+    kind: "fee",
+    feeKey: key,
+    description,
+    sku: "",
+    hsn: FEE_SAC[key],
+    qty: 1,
+    unitPrice: gross,
+    grossAmount: gross,
+    discount: 0,
+    taxableValue,
+    taxRate: FEE_TAX_RATE,
+    ...splitTax(tax, supplyType),
+    tax,
+    total: gross,
+  };
+}
+
+/**
+ * Spread a refunded fee amount over the order's fees in proportion (the last fee with an amount
+ * takes the rounding remainder). Returns [{ key, description, gross }] for every fee > 0.
+ */
+export function allocateFeeRefund(order, feesAmount = 0) {
+  const fees = orderFees(order).filter(([, , amount]) => amount > 0);
+  const feeSum = round2(fees.reduce((s, [, , a]) => s + a, 0));
+  const target = round2(Math.min(Number(feesAmount) || 0, feeSum));
+  const out = [];
+  if (!(target > 0) || !(feeSum > 0)) return out;
+  let left = target;
+  fees.forEach(([key, description, amount], idx) => {
+    const gross = idx === fees.length - 1 ? round2(left) : round2((amount * target) / feeSum);
+    left = round2(left - gross);
+    if (gross > 0) out.push({ key, description, gross });
+  });
+  return out;
+}
+
+/**
+ * Invoice lines of an order. `feeKeys` limits which fees are included: all three on combined
+ * (pre-phase-4) invoices, only the seller's delivery charge on split seller invoices.
+ */
+export function buildInvoiceLines(order, supplyType, { feeKeys = ALL_FEE_KEYS } = {}) {
   const lines = (order.items || []).map((item) => {
     const grossAmount = round2(item.lineSubtotal ?? item.unitPrice * item.qty);
     const discount = round2(item.couponShare || 0);
@@ -128,30 +187,10 @@ export function buildInvoiceLines(order, supplyType) {
       Object.assign(lastItem, { taxableValue, tax, ...splitTax(tax, supplyType) });
     }
   }
-  const fees = [
-    ["delivery", "Delivery charges", order.deliveryFee],
-    ["partner", order.deliveryPartner?.name ? `Delivery partner (${order.deliveryPartner.name})` : "Delivery partner fee", order.partnerFee],
-    ["platform", "Platform fee", order.platformFee],
-  ];
-  for (const [key, description, amount] of fees) {
-    const gross = round2(amount || 0);
-    if (gross <= 0) continue;
-    const { taxableValue, tax } = splitInclusive(gross, FEE_TAX_RATE);
-    lines.push({
-      kind: "fee",
-      description,
-      sku: "",
-      hsn: FEE_SAC[key],
-      qty: 1,
-      unitPrice: gross,
-      grossAmount: gross,
-      discount: 0,
-      taxableValue,
-      taxRate: FEE_TAX_RATE,
-      ...splitTax(tax, supplyType),
-      tax,
-      total: gross,
-    });
+  for (const [key, description, gross] of orderFees(order)) {
+    if (gross <= 0 || !feeKeys.includes(key)) continue;
+    const { feeKey, ...line } = feeLine(key, description, gross, supplyType);
+    lines.push(line);
   }
   return lines;
 }
@@ -171,18 +210,52 @@ export function sumTotals(lines) {
 }
 
 
-/** Counter bump inside the caller's transaction: an aborted invoice never burns a number. */
-async function nextSequence(tenantId, key, session) {
+/** GST rule 46: invoice / credit note serial numbers are at most 16 characters. */
+export const MAX_DOC_NUMBER_LENGTH = 16;
+
+/** Short store code (<= 4 uppercase letters/digits) derived from the store slug or name. */
+export function documentCode(tenant) {
+  const raw = String(tenant?.slug || tenant?.name || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return raw.slice(0, 4) || "MSP";
+}
+
+/**
+ * Document number, always <= 16 chars:
+ *   invoice      CODE/2627/000123   (code <= 4, FY "2026-27" -> "2627", 6-digit sequence)
+ *   credit note  CODE/2627/C00123   (C + 5-digit sequence)
+ * Very large sequences first shorten the code, then drop the separators. Numbers issued before
+ * this format (INV/<SLUG>/<FY>/<SEQ>) are kept as they are.
+ */
+export function formatDocNumber(code, fy, seq, kind = "invoice") {
+  const fy4 = String(fy).replace(/^\d{2}(\d{2})-(\d{2})$/, "$1$2");
+  const tail = kind === "credit_note" ? `C${String(seq).padStart(5, "0")}` : String(seq).padStart(6, "0");
+  let c = String(code || "MSP").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || "M";
+  let out = `${c}/${fy4}/${tail}`;
+  while (out.length > MAX_DOC_NUMBER_LENGTH && c.length > 1) {
+    c = c.slice(0, -1);
+    out = `${c}/${fy4}/${tail}`;
+  }
+  if (out.length > MAX_DOC_NUMBER_LENGTH) out = `${c}${fy4}${tail}`;
+  return out;
+}
+
+/**
+ * Counter bump inside the caller's transaction: an aborted invoice never burns a number.
+ * Returns { seq, code }: the store code is fixed on the counter row the first time the series
+ * is used in a financial year, so a later slug change cannot change the prefix mid-year.
+ */
+async function nextSequence(tenantId, key, session, tenant = null) {
   const counter = await InvoiceCounter.findOneAndUpdate(
     { tenantId, financialYear: key },
     { $inc: { seq: 1 } },
     withSession(session, { new: true, upsert: true, setDefaultsOnInsert: true })
   );
-  return counter.seq;
-}
-
-function tenantSlug(tenant) {
-  return String(tenant?.slug || "MSP").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 16) || "MSP";
+  let code = counter.code;
+  if (!code) {
+    code = documentCode(tenant);
+    await InvoiceCounter.updateOne({ _id: counter._id, code: { $in: ["", null] } }, { $set: { code } }, withSession(session));
+  }
+  return { seq: counter.seq, code };
 }
 
 async function parties(order, session) {
@@ -237,12 +310,14 @@ export async function generateInvoice(order, { session = null } = {}) {
     const p = await parties(order, s);
     const gstins = { sellerGstin: p.seller.gstin, buyerGstin: p.buyer.gstin };
     const supplyType = supplyTypeFor(p.seller.state, p.ship.state, gstins);
-    const lines = buildInvoiceLines(order, supplyType);
+    // Split invoicing (phase 4): the seller invoices goods + its own delivery charge; the
+    // platform fee and platform courier / partner fee go on the platform's own invoice.
+    const lines = buildInvoiceLines(order, supplyType, { feeKeys: SELLER_FEE_KEYS });
     const totals = sumTotals(lines);
     const issuedAt = new Date();
     const fy = financialYear(issuedAt);
-    const seq = await nextSequence(p.tenantId, fy, s);
-    const invoiceNumber = `INV/${tenantSlug(p.tenant)}/${fy}/${String(seq).padStart(6, "0")}`;
+    const { seq, code } = await nextSequence(p.tenantId, fy, s, p.tenant);
+    const invoiceNumber = formatDocNumber(code, fy, seq, "invoice");
     const [invoice] = await Invoice.create(
       [
         {
@@ -263,6 +338,7 @@ export async function generateInvoice(order, { session = null } = {}) {
           paymentMethod: order.paymentMethod,
           poNumber: order.poNumber || "",
           couponCode: order.couponCode || "",
+          feeLayout: "split",
           lines,
           totals,
         },
@@ -276,6 +352,8 @@ export async function generateInvoice(order, { session = null } = {}) {
     );
     order.invoiceId = invoice._id;
     order.invoiceNumber = invoice.invoiceNumber;
+    const platform = await import("./platform.js");
+    await platform.issuePlatformInvoice(order, { session: s, sellerInvoice: invoice });
     return invoice;
   };
   if (session) return run(session);
@@ -290,28 +368,87 @@ export async function generateInvoice(order, { session = null } = {}) {
   }
 }
 
+/**
+ * Void an invoice. Not used by the order flow any more: a cancelled order whose invoice was issued
+ * gets a full credit note instead (an issued invoice may already be reported). Kept for callers.
+ */
 export async function cancelInvoice(orderId, { session = null } = {}) {
   await Invoice.updateOne({ orderId, status: "issued" }, { $set: { status: "cancelled" } }, withSession(session));
 }
 
 /**
- * Credit note for a refund (full order). One per refund key; numbered in its own series
- * (`CN/<STORE>/<FY>/000001`) inside the caller's transaction.
+ * Credit note lines for part of an order: `items` = [{ itemId, qty, amount, taxableValue, tax }]
+ * (amounts GST-inclusive, after coupon) plus `feesAmount` spread over the order's fees in
+ * proportion (the last fee takes the rounding remainder).
  */
-export async function issueCreditNote(order, { refundKey, reason = "", session = null } = {}) {
+export function creditLinesFor(order, supplyType, { items = [], feesAmount = 0, feeKeys = ALL_FEE_KEYS } = {}) {
+  const lines = [];
+  for (const row of items) {
+    const item = (order.items || []).find((i) => String(i._id) === String(row.itemId));
+    if (!item || !(row.qty > 0)) continue;
+    const amount = round2(row.amount || 0);
+    const grossAmount = round2((item.unitPrice || 0) * row.qty);
+    const taxableValue = round2(row.taxableValue ?? splitInclusive(amount, item.taxRate || 0).taxableValue);
+    const tax = round2(amount - taxableValue);
+    lines.push({
+      kind: "item",
+      description: item.name,
+      sku: item.sku,
+      hsn: item.hsn || "",
+      qty: row.qty,
+      unitPrice: item.unitPrice,
+      grossAmount,
+      discount: round2(Math.max(0, grossAmount - amount)),
+      taxableValue,
+      taxRate: item.taxRate || 0,
+      ...splitTax(tax, supplyType),
+      tax,
+      total: amount,
+    });
+  }
+  for (const { key, description, gross } of allocateFeeRefund(order, feesAmount)) {
+    if (!feeKeys.includes(key)) continue;
+    const { feeKey, ...line } = feeLine(key, description, gross, supplyType);
+    lines.push(line);
+  }
+  return lines;
+}
+
+/**
+ * Credit note against the order's invoice. One per refund key; numbered in its own series
+ * (`CODE/2627/C00001`) inside the caller's transaction. Without `part` it reverses the whole
+ * invoice; with `part` = { items, feesAmount, returnId } it covers only those lines (returns,
+ * or what is left after earlier partial returns).
+ */
+export async function issueCreditNote(order, { refundKey, reason = "", session = null, part = null } = {}) {
   const run = async (s) => {
     const existing = await CreditNote.findOne({ orderId: order._id, refundKey }, null, withSession(s));
     if (existing) return existing;
     const invoice =
       (await Invoice.findOne({ orderId: order._id }, null, withSession(s))) || (await generateInvoice(order, { session: s }));
+    const split = invoice.feeLayout === "split";
+    let platformNote = null;
+    if (split) {
+      // The platform's share of the refunded fees goes on a credit note in the platform series.
+      const platform = await import("./platform.js");
+      platformNote = await platform.issuePlatformCreditNote(order, { refundKey, reason, part, session: s });
+    }
+    const lines = part
+      ? creditLinesFor(order, invoice.supplyType, split ? { ...part, feeKeys: SELLER_FEE_KEYS } : part)
+      : invoice.lines;
+    // Only platform fees refunded (no goods / own delivery): no seller document to issue.
+    if (split && !lines.length && platformNote) return platformNote;
     const p = await parties(order, s);
     const issuedAt = new Date();
     const fy = financialYear(issuedAt);
-    const seq = await nextSequence(p.tenantId, `${fy}:CN`, s);
+    const { seq, code } = await nextSequence(p.tenantId, `${fy}:CN`, s, p.tenant);
+    const totals = part ? sumTotals(lines) : invoice.totals;
     const [note] = await CreditNote.create(
       [
         {
-          creditNoteNumber: `CN/${tenantSlug(p.tenant)}/${fy}/${String(seq).padStart(6, "0")}`,
+          creditNoteNumber: formatDocNumber(code, fy, seq, "credit_note"),
+          scope: part ? "partial" : "full",
+          returnId: part?.returnId || null,
           tenantId: p.tenantId,
           orderId: order._id,
           invoiceId: invoice._id,
@@ -327,8 +464,8 @@ export async function issueCreditNote(order, { refundKey, reason = "", session =
           buyer: invoice.buyer,
           placeOfSupply: invoice.placeOfSupply,
           supplyType: invoice.supplyType,
-          lines: invoice.lines,
-          totals: invoice.totals,
+          lines,
+          totals,
         },
       ],
       withSession(s)

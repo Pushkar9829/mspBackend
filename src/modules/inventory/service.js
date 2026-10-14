@@ -11,6 +11,7 @@ import { ProductVariant } from "../catalog/variant.model.js";
 import { AppError } from "../../utils/AppError.js";
 import { tenantFilter } from "../../middleware/tenantScope.js";
 import { emitDomain } from "../../utils/events.js";
+import { assertWithinLimit } from "../billing/entitlements.js";
 import { paginate, paginated } from "../../utils/pagination.js";
 import { withTransaction, withSession, afterCommit } from "../../utils/transaction.js";
 
@@ -183,6 +184,8 @@ function warehouseConflict(err) {
 }
 
 export async function createWarehouse(req, body) {
+  // Plan limit: active warehouses (an inactive one doesn't count).
+  if (body?.status !== "inactive") await assertWithinLimit(req.tenantId, "warehouses", { req });
   try {
     return await Warehouse.create({ ...pickWarehouse(body), tenantId: req.tenantId });
   } catch (err) {
@@ -191,6 +194,10 @@ export async function createWarehouse(req, body) {
 }
 
 export async function updateWarehouse(req, id, body) {
+  if (body?.status === "active") {
+    const current = await Warehouse.findOne({ _id: id, ...tenantFilter(req) }).select("tenantId status").lean();
+    if (current && current.status === "inactive") await assertWithinLimit(current.tenantId, "warehouses", { req });
+  }
   let doc;
   try {
     doc = await Warehouse.findOneAndUpdate({ _id: id, ...tenantFilter(req) }, { $set: pickWarehouse(body) }, {
@@ -770,11 +777,76 @@ export async function consumeOrderStock(orderId, { session, actorId = null, note
  */
 export async function restoreReturnedStock(orderId, { session, actorId = null, damagedByLine = {}, note = "return received" } = {}) {
   const rows = await reservationsForOwner("order", orderId, session, ["consumed"]);
+  // A line's damaged units are spread over its reservations (never counted twice).
+  const damagedLeft = new Map(Object.entries(damagedByLine || {}).map(([k, v]) => [String(k), Math.max(0, Number(v) || 0)]));
   for (const row of rows) {
-    const damagedQty = Number(damagedByLine[String(row.owner?.line || "")] || 0);
+    const line = String(row.owner?.line || "");
+    const damagedQty = Math.min(row.qty, damagedLeft.get(line) || 0);
+    if (damagedQty) damagedLeft.set(line, damagedLeft.get(line) - damagedQty);
     await moveReservation({ reservationId: row._id, from: "consumed", to: "restored", damagedQty, note, actorId, session });
   }
   return rows.length;
+}
+
+/**
+ * Item-level return received: put back ONLY the returned units of the given order lines.
+ * `lines` = [{ lineId, qty, damagedQty }]. A consumed reservation covering more units than come
+ * back is split: its qty shrinks and a new `restored` reservation records the returned part
+ * (damaged units go to `damaged`, the rest to `available`). Returns the units restored.
+ * Lines without consumed reservations (very old orders) are skipped.
+ */
+export async function restoreReturnedLines(orderId, lines = [], { session, actorId = null, note = "return received" } = {}) {
+  const rows = await reservationsForOwner("order", orderId, session, ["consumed"]);
+  let restored = 0;
+  for (const line of lines) {
+    let left = Math.max(0, Number(line.qty) || 0);
+    let damagedLeft = Math.min(left, Math.max(0, Number(line.damagedQty) || 0));
+    for (const row of rows.filter((r) => String(r.owner?.line || "") === String(line.lineId))) {
+      if (left <= 0) break;
+      const take = Math.min(left, row.qty);
+      const dmg = Math.min(damagedLeft, take);
+      if (take === row.qty) {
+        await moveReservation({ reservationId: row._id, from: "consumed", to: "restored", damagedQty: dmg, note, actorId, session });
+      } else {
+        const shrunk = await StockReservation.findOneAndUpdate(
+          { _id: row._id, status: "consumed", qty: row.qty },
+          { $inc: { qty: -take }, $push: { history: { from: "consumed", to: "consumed", note: `${note}: ${take} returned`, at: new Date() } } },
+          withSession(session, { new: true })
+        );
+        if (!shrunk) throw new AppError(409, "Stock for this return changed. Refresh and try again.", "INVENTORY_STATE");
+        row.qty -= take;
+        const [part] = await StockReservation.create(
+          [
+            {
+              tenantId: row.tenantId,
+              warehouseId: row.warehouseId,
+              variantId: row.variantId,
+              qty: take,
+              owner: { type: row.owner.type, id: row.owner.id, line: row.owner.line || null, cartId: null },
+              status: "restored",
+              active: false,
+              reference: row.reference,
+              damagedQty: dmg,
+              history: [{ from: "consumed", to: "restored", note, at: new Date() }],
+            },
+          ],
+          withSession(session)
+        );
+        const stock = await incStock(
+          { tenantId: row.tenantId, warehouseId: row.warehouseId, variantId: row.variantId },
+          { available: take - dmg, damaged: dmg },
+          session
+        );
+        if (!stock) throw new AppError(409, "Inventory row missing for this item", "INVENTORY_DRIFT");
+        if (take - dmg > 0) notifyRestockLater(session, { tenantId: row.tenantId, variantId: row.variantId });
+        await writeStockTx({ stock, reason: "return", qty: take, actorId, reference: row.reference, note, reservationId: part._id, session });
+      }
+      left -= take;
+      damagedLeft -= dmg;
+      restored += take;
+    }
+  }
+  return restored;
 }
 
 async function clearCartPointer(hold, session) {

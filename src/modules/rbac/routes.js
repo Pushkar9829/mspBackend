@@ -5,6 +5,7 @@ import { resolveTenant, requireStaff } from "../../middleware/tenantScope.js";
 import { validate } from "../../middleware/validate.js";
 import { audit } from "../../middleware/audit.js";
 import * as ctrl from "./controller.js";
+import { requireFeature } from "../billing/entitlements.js";
 import { createRoleSchema, updateRoleSchema, idParamSchema } from "./validators.js";
 
 export const permissionRouter = Router();
@@ -19,6 +20,7 @@ roleRouter.post(
   "/",
   audit("create", "role"),
   authorize("roles.create"),
+  requireFeature("customRoles"),
   validate(createRoleSchema),
   ctrl.createRole
 );

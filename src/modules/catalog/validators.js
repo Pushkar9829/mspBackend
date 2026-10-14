@@ -13,6 +13,12 @@ const url = z
   .max(1000)
   .refine((v) => v === "" || isSafeMediaUrl(v), "Must be an http(s) URL or an /uploads/ path");
 const money = z.number().min(0).max(1e9);
+/** SKU: letters, numbers, '-' and '_' only (no spaces/symbols). Existing SKUs are only re-checked when changed. */
+export const SKU_PATTERN = /^[A-Za-z0-9_-]+$/;
+export const SKU_MESSAGE = "SKU can only contain letters, numbers, '-' and '_'";
+const skuField = z.string().trim().min(1).max(80).regex(SKU_PATTERN, SKU_MESSAGE);
+/** Update bodies: format is checked in the service only when the SKU actually changes. */
+const skuFieldLoose = z.string().trim().min(1).max(80);
 const pageQuery = {
   page: z.coerce.number().int().min(1).max(100000).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
@@ -33,6 +39,8 @@ export const createCategorySchema = z.object({
     image: url.optional(),
     icon: shortText(200).optional(),
     seo: body({ title: shortText(200).optional(), description: shortText(500).optional() }).optional(),
+    /** Platform admin only (ignored for store staff). */
+    requiresFssai: z.boolean().optional(),
   }),
 });
 
@@ -175,7 +183,7 @@ export const specificationsSchema = z
   .refine((o) => JSON.stringify(o).length <= 16 * 1024, { message: "specifications too large (max 16KB)" });
 
 const variantBodyShape = {
-  sku: z.string().trim().min(1).max(80),
+  sku: skuField,
   barcode: shortText(80).optional(),
   attributes: variantAttributesSchema.optional(),
   listPrice: money,
@@ -186,7 +194,7 @@ const variantBodyShape = {
 
 const productBodyShape = {
   name: z.string().trim().min(1).max(200),
-  sku: z.string().trim().min(1).max(80),
+  sku: skuField,
   barcode: shortText(80).optional(),
   description: z.string().max(20000).optional(),
   specifications: specificationsSchema.optional(),
@@ -228,6 +236,7 @@ export const updateProductSchema = z.object({
   body: body(productBodyShape)
     .partial()
     .extend({
+      sku: skuFieldLoose.optional(),
       categoryId: objectId.nullable().optional(),
       brandId: objectId.nullable().optional(),
       /** Warehouse for an `availableQty` change (default warehouse when omitted). */
@@ -244,9 +253,26 @@ const csvBool = z.preprocess((v) => {
   return v;
 }, z.boolean().optional());
 
+const inr = (n) => `₹${Number(n).toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+
+/**
+ * Price rules shared with the product form: selling price ≤ MRP / list price; each quantity slab's
+ * max qty (when set) ≥ its min qty. Messages are written for sellers (CSV import report).
+ */
+function bulkPriceRules(row, ctx) {
+  if (row.listPrice != null && row.sellingPrice > row.listPrice) {
+    ctx.addIssue({ code: "custom", path: ["sellingPrice"], message: `Selling price ${inr(row.sellingPrice)} is above MRP ${inr(row.listPrice)}` });
+  }
+  (row.tierPrices || []).forEach((t, i) => {
+    if (t.maxQty != null && t.maxQty < t.minQty) {
+      ctx.addIssue({ code: "custom", path: ["tierPrices", i, "maxQty"], message: `Price slab ${i + 1}: max qty ${t.maxQty} is below min qty ${t.minQty}` });
+    }
+  });
+}
+
 export const bulkItemSchema = body({
   name: z.string().trim().min(1).max(200),
-  sku: z.string().trim().min(1).max(80),
+  sku: skuField,
   sellingPrice: money,
   listPrice: money.optional(),
   description: z.string().max(20000).optional(),
@@ -263,7 +289,7 @@ export const bulkItemSchema = body({
   warehouseId: objectId.optional(),
   scheduledAt: z.coerce.date().optional(),
   specifications: specificationsSchema.optional(),
-});
+}).superRefine(bulkPriceRules);
 
 const queryBool = z.preprocess((v) => (Array.isArray(v) ? v[0] : v), z.enum(["true", "false", "1", "0"]).optional());
 
@@ -293,7 +319,7 @@ export const createVariantSchema = z.object({
 
 export const updateVariantSchema = z.object({
   params: z.object({ id: objectId }),
-  body: body(variantBodyShape).partial(),
+  body: body(variantBodyShape).partial().extend({ sku: skuFieldLoose.optional() }),
 });
 
 export const idParamSchema = z.object({

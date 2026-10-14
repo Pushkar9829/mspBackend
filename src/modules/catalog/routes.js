@@ -9,6 +9,7 @@ import * as rateLimits from "../../middleware/rateLimits.js";
 import { asyncHandler } from "../../utils/asyncHandler.js";
 import { MAX_UPLOAD_BYTES } from "../../config/constants.js";
 import * as service from "./service.js";
+import { requireFeature } from "../billing/entitlements.js";
 import { subscribeRestock, confirmRestock, listMyRestockAlerts, deleteMyRestockAlert } from "./restock.js";
 import { z } from "zod";
 import * as reviews from "../reviews/service.js";
@@ -258,6 +259,7 @@ productRouter.get("/", authorize("products.view"), asyncHandler(async (req, res)
 productRouter.get(
   "/export",
   authorizeAny("products.create", "products.edit"),
+  requireFeature("exports"),
   asyncHandler(async (req, res) => {
     const csv = await service.exportProductsCsv(req);
     res.setHeader("Content-Type", "text/csv; charset=utf-8");

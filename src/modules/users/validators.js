@@ -1,7 +1,11 @@
 import { z } from "zod";
 import { profileSchema } from "../auth/validators.js";
+import { isIndianPhone, PHONE_MESSAGE } from "../../utils/phone.js";
+import { newPassword } from "../../utils/password.js";
 
 const objectId = z.string().regex(/^[a-f\d]{24}$/i, "Invalid id");
+/** Empty = no phone; otherwise a valid Indian phone (QA R9). */
+const phone = z.string().trim().max(20).refine((v) => v === "" || isIndianPhone(v), PHONE_MESSAGE);
 /** Statuses an administrator may set ("locked"/"deleted" are system-managed). */
 const ADMIN_STATUSES = ["active", "pending", "suspended"];
 
@@ -9,8 +13,8 @@ export const createUserSchema = z.object({
   body: z.object({
     name: z.string().trim().min(2).max(120),
     email: z.string().trim().email().max(254),
-    password: z.string().min(8).max(100),
-    phone: z.string().trim().max(20).optional(),
+    password: newPassword,
+    phone: phone.optional(),
     roleId: objectId,
     tenantId: objectId.optional(),
     status: z.enum(ADMIN_STATUSES).optional(),
@@ -22,7 +26,7 @@ export const updateUserSchema = z.object({
   params: z.object({ id: objectId }),
   body: z.object({
     name: z.string().trim().min(2).max(120).optional(),
-    phone: z.string().trim().max(20).optional(),
+    phone: phone.optional(),
     roleId: objectId.optional(),
     status: z.enum(ADMIN_STATUSES).optional(),
     profile: profileSchema.optional(),

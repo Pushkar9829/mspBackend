@@ -4,7 +4,7 @@ import { User } from "../users/user.model.js";
 import { AppError } from "../../utils/AppError.js";
 import { slugify } from "../../utils/slug.js";
 import { paginate, paginated } from "../../utils/pagination.js";
-import { PERMISSIONS, SYSTEM_ROLES, isPlatformOnlyPermission, permissionInfo } from "../../config/constants.js";
+import { PERMISSIONS, SYSTEM_ROLES, SYSTEM_ROLE_ONLY_PERMISSIONS, isPlatformOnlyPermission, permissionInfo } from "../../config/constants.js";
 
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -15,13 +15,21 @@ function escapeRegex(value) {
  * so it is complete even before the Permission collection is re-synced).
  */
 export async function listPermissions(req) {
-  const keys = req?.isPlatformAdmin ? PERMISSIONS : PERMISSIONS.filter((p) => !isPlatformOnlyPermission(p));
+  // Store staff never see platform-only keys nor system-role-only keys (rider.app).
+  const keys = req?.isPlatformAdmin
+    ? PERMISSIONS
+    : PERMISSIONS.filter((p) => !isPlatformOnlyPermission(p) && !SYSTEM_ROLE_ONLY_PERMISSIONS.includes(p));
   const stored = await Permission.find({ key: { $in: keys } }).select("_id key createdAt updatedAt").lean();
   const byKey = new Map(stored.map((p) => [p.key, p]));
   return keys
     .map((key) => {
       const row = byKey.get(key);
-      return { _id: row?._id, ...permissionInfo(key), platformOnly: isPlatformOnlyPermission(key) };
+      return {
+        _id: row?._id,
+        ...permissionInfo(key),
+        platformOnly: isPlatformOnlyPermission(key),
+        systemRoleOnly: SYSTEM_ROLE_ONLY_PERMISSIONS.includes(key),
+      };
     })
     .sort((a, b) => a.group.localeCompare(b.group) || a.resource.localeCompare(b.resource) || a.key.localeCompare(b.key));
 }
@@ -37,6 +45,10 @@ export function assertGrantable(req, permissions = []) {
   const forbidden = unique.filter((p) => isPlatformOnlyPermission(p));
   if (forbidden.length) {
     throw new AppError(403, `Permissions not assignable to tenant roles: ${forbidden.join(", ")}`, "FORBIDDEN");
+  }
+  const systemOnly = unique.filter((p) => SYSTEM_ROLE_ONLY_PERMISSIONS.includes(p));
+  if (systemOnly.length) {
+    throw new AppError(403, `Permissions reserved for system roles: ${systemOnly.join(", ")}`, "FORBIDDEN");
   }
   const invalid = unique.filter((p) => !PERMISSIONS.includes(p));
   if (invalid.length) {
@@ -63,6 +75,9 @@ export function assertRoleWithinActor(req, role) {
 }
 
 const BUYER_SLUG = SYSTEM_ROLES.BUYER;
+// System roles that are not store-staff roles: hidden from store staff and never assignable by them.
+// Riders (phase 5) are managed on the Riders page, never through staff role assignment.
+export const NON_STAFF_SLUGS = [BUYER_SLUG, "seller_applicant", SYSTEM_ROLES.RIDER];
 
 /**
  * Roles visible to the actor, each with `usersCount` (holders, excluding deleted accounts).
@@ -76,7 +91,7 @@ export async function listRoles(req) {
   const clauses = [];
   if (!req.isPlatformAdmin) {
     clauses.push({
-      $or: [{ tenantId: req.tenantId }, { isSystem: true, scope: "tenant", slug: { $ne: BUYER_SLUG } }],
+      $or: [{ tenantId: req.tenantId }, { isSystem: true, scope: "tenant", slug: { $nin: NON_STAFF_SLUGS } }],
     });
   } else if (req.tenantId) {
     clauses.push({
@@ -85,7 +100,7 @@ export async function listRoles(req) {
   }
   const scope = req.query.scope ? String(req.query.scope) : "";
   if (scope === "platform" || scope === "tenant") clauses.push({ scope });
-  else if (scope === "staff") clauses.push({ scope: "tenant", $nor: [{ isSystem: true, slug: BUYER_SLUG }] });
+  else if (scope === "staff") clauses.push({ scope: "tenant", $nor: [{ isSystem: true, slug: { $in: NON_STAFF_SLUGS } }] });
   else if (scope === "buyer") clauses.push({ isSystem: true, slug: BUYER_SLUG });
   else if (scope) throw new AppError(400, "scope must be platform, tenant, staff or buyer", "VALIDATION_ERROR");
   if (req.query.system === "true") clauses.push({ isSystem: true });
@@ -118,7 +133,7 @@ export async function getRole(req, id) {
   if (!req.isPlatformAdmin && role.tenantId && String(role.tenantId) !== String(req.tenantId)) {
     throw new AppError(403, "Cross-tenant access denied", "FORBIDDEN");
   }
-  if (!req.isPlatformAdmin && role.isSystem && role.slug === BUYER_SLUG) {
+  if (!req.isPlatformAdmin && role.isSystem && NON_STAFF_SLUGS.includes(role.slug)) {
     throw new AppError(404, "Role not found", "NOT_FOUND");
   }
   if (!req.isPlatformAdmin && !role.tenantId && !role.isSystem) {

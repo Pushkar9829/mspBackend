@@ -7,6 +7,24 @@ import { validate } from "../../middleware/validate.js";
 import { audit } from "../../middleware/audit.js";
 import { asyncHandler } from "../../utils/asyncHandler.js";
 import * as service from "./service.js";
+import { assertFeature } from "../billing/entitlements.js";
+import { mountRepaymentRoutes } from "../payouts/routes.js";
+
+/**
+ * Plan feature `creditTerms`: needed to ENABLE credit / purchase orders or set a credit limit above 0.
+ * Switching terms off, setting the limit to 0, recording payments and adjustments stay available so a
+ * downgraded store can wind existing credit down.
+ */
+async function creditTermsGate(req, _res, next) {
+  try {
+    const b = req.body || {};
+    const enabling = b.creditEnabled === true || b.purchaseOrderEnabled === true || (b.creditLimit !== undefined && Number(b.creditLimit) > 0);
+    if (enabling) await assertFeature(req.tenantId, "creditTerms", { req });
+    next();
+  } catch (err) {
+    next(err);
+  }
+}
 
 const objectId = z.string().regex(/^[a-f\d]{24}$/i, "Invalid id");
 const userParam = z.object({ userId: objectId });
@@ -36,6 +54,9 @@ router.get(
     res.json(await service.getLedgerForUser(req.user._id, req.query.tenantId || null, { page, limit, before }));
   })
 );
+
+// Buyer repays credit / PO dues online through the platform (p4-payouts): POST /me/:tenantId/pay(/verify).
+mountRepaymentRoutes(router);
 
 const seller = Router();
 seller.use(resolveTenant, requireStaff, requireTenant);
@@ -69,6 +90,7 @@ seller.put(
     })
   ),
   audit("terms", "ledger"),
+  creditTermsGate,
   asyncHandler(async (req, res) => {
     res.json(await service.setBuyerTerms(req, req.params.userId, req.body));
   })

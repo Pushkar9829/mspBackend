@@ -35,6 +35,11 @@ const productSchema = new mongoose.Schema(
     hsn: { type: String, default: "", trim: true },
     status: { type: String, enum: PRODUCT_STATUSES, default: "draft" },
     enabled: { type: Boolean, default: true },
+    /**
+     * Set when the platform (not the seller) hid the product, e.g. "fssai_expired" (food product of
+     * a store whose FSSAI licence expired). `enabled` is false meanwhile; the seller can't re-enable it.
+     */
+    complianceHold: { type: String, default: "" },
     scheduledAt: { type: Date, default: null },
     /** Who scheduled the publish; the scheduler re-checks that this user still holds products.publish. */
     scheduledBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },

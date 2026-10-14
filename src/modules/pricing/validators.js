@@ -45,6 +45,12 @@ const offerBody = {
   endsAt: z.coerce.date(),
 };
 
+/** POST /offers/:id/reject (platform admin): the reason is shown to the seller. */
+export const rejectOfferSchema = z.object({
+  params: z.object({ id: objectId }),
+  body: z.object({ reason: z.string().trim().min(3, "Give the seller a reason (at least 3 characters)").max(1000) }),
+});
+
 export const createOfferSchema = z.object({
   body: z
     .object({

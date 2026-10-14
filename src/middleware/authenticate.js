@@ -6,6 +6,80 @@ import { env } from "../config/env.js";
 import { SYSTEM_ROLES, isPlatformOnlyPermission } from "../config/constants.js";
 
 const INACTIVE_TENANT = new Set(["suspended", "archived"]);
+
+/**
+ * Staff of a PAUSED store keep working on these API areas (path under /api/v1; `methods` limits
+ * the verbs). Everything else -> 403 STORE_PAUSED.
+ */
+export const PAUSED_STAFF_ALLOWLIST = [
+  { prefix: "/auth" },
+  { prefix: "/orders" }, // orders, returns, refunds, invoices, credit notes
+  { prefix: "/shipping" }, // fulfilling orders already placed
+  { prefix: "/chat" },
+  { prefix: "/notifications" },
+  { prefix: "/files" },
+  { prefix: "/billing" }, // placeholder (subscription billing)
+  { prefix: "/tenants/me", methods: ["GET"] },
+  { prefix: "/settings", methods: ["GET"] },
+  // Phase 5: own-fleet deliveries of orders already placed (board, rider app, rider list).
+  { prefix: "/fleet" },
+  { prefix: "/rider" },
+  { prefix: "/riders", methods: ["GET"] },
+  // Disputes about placed orders: read them and reply with evidence (like returns), nothing else.
+  { prefix: "/disputes", methods: ["GET"] },
+  { pattern: /^\/disputes\/[^/]+\/messages$/, methods: ["POST"] },
+  // Confirming COD cash a rider hands over (money already collected for placed orders).
+  { pattern: /^\/riders\/[^/]+\/cash\/deposits$/, methods: ["POST"] },
+  // Read-only view of the store's own seller application (notification links point there).
+  { pattern: /^\/seller-applications\/me$/, methods: ["GET"] },
+  { pattern: /^\/seller-applications\/me\/documents\/[^/]+\/link$/, methods: ["GET"] },
+];
+
+/** Staff of a PENDING store (not approved yet): onboarding only. Everything else -> 403 STORE_PENDING. */
+export const PENDING_STAFF_ALLOWLIST = [
+  { prefix: "/auth" },
+  { prefix: "/files" },
+  { prefix: "/seller-applications" },
+  { prefix: "/terms" },
+  { prefix: "/notifications", methods: ["GET"] },
+  { prefix: "/tenants/me", methods: ["GET"] },
+];
+
+function apiPath(req) {
+  const raw = String(req.originalUrl || req.url || "").split("?")[0];
+  return raw.replace(/^\/api\/v1(?=\/|$)/, "") || "/";
+}
+
+function allowedBy(list, req) {
+  const path = apiPath(req);
+  const method = String(req.method || "GET").toUpperCase();
+  return list.some(
+    (rule) =>
+      (rule.pattern ? rule.pattern.test(path) : path === rule.prefix || path.startsWith(`${rule.prefix}/`)) &&
+      (!rule.methods || rule.methods.includes(method) || (method === "HEAD" && rule.methods.includes("GET")))
+  );
+}
+
+/**
+ * HTTP-only gate for staff of a paused / pending store (sockets and refresh are not affected).
+ * Throws 403 STORE_PAUSED / STORE_PENDING (with `status` + `reason`) outside the allowlists.
+ */
+export function assertStoreStateAllows(req, user, role) {
+  const tenant = user?.tenantId && typeof user.tenantId === "object" && user.tenantId.status ? user.tenantId : null;
+  if (!tenant || isPlatformRole(role)) return;
+  if (tenant.status === "paused" && !allowedBy(PAUSED_STAFF_ALLOWLIST, req)) {
+    throw new AppError(403, "Your store is paused. Only orders, returns, support and notifications are available.", "STORE_PAUSED", {
+      status: "paused",
+      reason: tenant.statusReason || "",
+    });
+  }
+  if (tenant.status === "pending" && !allowedBy(PENDING_STAFF_ALLOWLIST, req)) {
+    throw new AppError(403, "Your store is not approved yet. Only onboarding is available.", "STORE_PENDING", {
+      status: "pending",
+      reason: tenant.statusReason || "",
+    });
+  }
+}
 const INACTIVE_USER = new Set(["suspended", "locked", "deleted", "pending"]);
 
 /** Platform admin = the system role with platform scope. Never derived from permission strings. */
@@ -83,19 +157,29 @@ function applyContext(req, ctx) {
   req.homeTenantId = ctx.user.homeTenantId || null;
 }
 
-export async function authenticate(req, _res, next) {
+async function authenticateWith(req, next, { gate }) {
   try {
-    applyContext(req, await loadAuthUser(bearer(req)));
+    const ctx = await loadAuthUser(bearer(req));
+    if (gate) assertStoreStateAllows(req, ctx.user, ctx.role);
+    applyContext(req, ctx);
     next();
   } catch (err) {
     next(err instanceof AppError ? err : new AppError(401, "Invalid or expired token", "UNAUTHORIZED"));
   }
 }
 
-/** Attach the user when a valid token is present; continue anonymously when there is none. */
-export async function optionalAuth(req, res, next) {
+/** Bearer auth + paused/pending store gate (PAUSED_STAFF_ALLOWLIST / PENDING_STAFF_ALLOWLIST). */
+export async function authenticate(req, _res, next) {
+  return authenticateWith(req, next, { gate: true });
+}
+
+/**
+ * Attach the user when a valid token is present; continue anonymously when there is none. Used by
+ * public (read) endpoints, so the paused/pending store gate does not apply.
+ */
+export async function optionalAuth(req, _res, next) {
   if (!bearer(req)) return next();
-  return authenticate(req, res, next);
+  return authenticateWith(req, next, { gate: false });
 }
 
 /**

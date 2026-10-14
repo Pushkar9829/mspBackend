@@ -57,6 +57,9 @@ export async function setup() {
       return row;
     },
     listRefunds: async (paymentId) => ({ items: fake.refunds.filter((r) => r.payment_id === paymentId) }),
+    // No order_id: webhook tests keep the amount from the signed event instead of a second fetch.
+    fetchPayment: async (id) => ({ id, status: "captured", currency: "INR" }),
+    capturePayment: async (id, amount) => ({ id, status: "captured", amount, currency: "INR" }),
   });
   process.env.RAZORPAY_KEY_ID ||= "rzp_test_x";
   return fake;
@@ -70,7 +73,7 @@ export async function teardown() {
 
 export async function makeStore({ stock = 10, price = 100, state = "Maharashtra" } = {}) {
   const tag = uid();
-  const tenant = await Tenant.create({ name: `Store ${tag}`, slug: `store-${tag}`, pickupAddress: { state, postalCode: "400001" } });
+  const tenant = await Tenant.create({ name: `Store ${tag}`, slug: `store-${tag}`, status: "active", pickupAddress: { state, postalCode: "400001" } });
   const product = await Product.create({
     tenantId: tenant._id,
     name: `Product ${tag}`,

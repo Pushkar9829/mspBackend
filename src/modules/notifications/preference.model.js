@@ -5,6 +5,7 @@ const channelSchema = new mongoose.Schema(
     inApp: { type: Boolean },
     email: { type: Boolean },
     sms: { type: Boolean },
+    push: { type: Boolean },
   },
   { _id: false }
 );
@@ -25,11 +26,11 @@ const notificationPreferenceSchema = new mongoose.Schema(
 );
 
 export const DEFAULT_PREFERENCES = {
-  order: { inApp: true, email: true, sms: true },
-  chat: { inApp: true, email: false, sms: false },
-  inventory: { inApp: true, email: true, sms: false },
-  marketing: { inApp: true, email: true, sms: false },
-  account: { inApp: true, email: true, sms: true },
+  order: { inApp: true, email: true, sms: true, push: true },
+  chat: { inApp: true, email: false, sms: false, push: true },
+  inventory: { inApp: true, email: true, sms: false, push: false },
+  marketing: { inApp: true, email: true, sms: false, push: false },
+  account: { inApp: true, email: true, sms: true, push: true },
 };
 
 /** Channels that cannot be switched off (security / legal notices). */

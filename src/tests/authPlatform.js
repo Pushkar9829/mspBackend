@@ -105,11 +105,11 @@ async function main() {
 
   const tA = await call("POST", "/api/v1/tenants", {
     token: adminToken,
-    body: { name: "Store A", status: "active", admin: { name: "A Admin", email: "a@x.test", password: "Password123!" }, branding: { primaryColor: "#111111" } },
+    body: { name: "Store A", status: "active", businessProfile: { legalName: "Store A Pvt Ltd", gstin: "27AAPFU0939F1ZV" }, admin: { name: "A Admin", email: "a@x.test", password: "Password123!" }, branding: { primaryColor: "#111111" } },
   });
   const tB = await call("POST", "/api/v1/tenants", {
     token: adminToken,
-    body: { name: "Store B", status: "active", admin: { name: "B Admin", email: "b@x.test", password: "Password123!" } },
+    body: { name: "Store B", status: "active", businessProfile: { legalName: "Store B Pvt Ltd", gstin: "07AABCA1234A1ZL" }, admin: { name: "B Admin", email: "b@x.test", password: "Password123!" } },
   });
   check("tenants created", tA.status === 201 && tB.status === 201, [tA.body, tB.body]);
   const tenantA = tA.body._id;
@@ -257,7 +257,7 @@ async function main() {
   const tdoc = await Tenant.findById(tenantA);
   check("nested merge kept primaryColor; slug untouched", tdoc.branding.primaryColor === "#111111" && tdoc.branding.secondaryColor === "#222222" && tdoc.slug === "store-a", tdoc.branding);
   const aCookie = refreshCookie(aLogin);
-  const susp = await call("PATCH", `/api/v1/tenants/${tenantA}`, { token: adminToken, body: { status: "suspended" } });
+  const susp = await call("PATCH", `/api/v1/tenants/${tenantA}`, { token: adminToken, body: { status: "suspended", reason: "auth platform test" } });
   check("platform admin suspends tenant", susp.status === 200);
   const aMe = await call("GET", "/api/v1/auth/me", { token: aToken });
   check("suspended tenant staff rejected", aMe.status === 403 && aMe.body.code === "TENANT_SUSPENDED", aMe.body);

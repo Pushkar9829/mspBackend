@@ -12,6 +12,8 @@ const categorySchema = new mongoose.Schema(
     sortOrder: { type: Number, default: 0 },
     image: { type: String, default: "" },
     icon: { type: String, default: "" },
+    /** Food category: sellers need a valid FSSAI licence; buyers see the seller's FSSAI number (inherited by sub-categories). */
+    requiresFssai: { type: Boolean, default: false },
     seo: {
       title: { type: String, default: "" },
       description: { type: String, default: "" },

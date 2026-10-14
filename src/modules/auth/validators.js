@@ -1,8 +1,10 @@
 import { z } from "zod";
 import { normalizeGstin } from "../../utils/gstin.js";
+import { newPassword } from "../../utils/password.js";
 
 const email = z.string().trim().email().max(254);
-const password = z.string().min(8).max(100);
+/** New passwords only (register / reset / change): see utils/password.js. */
+const password = newPassword;
 const phone = z.string().trim().max(20).regex(/^[0-9+\-() ]*$/, "Invalid phone");
 
 /** Buyer business types. "retailer" is stored as "kirana", "restaurant" as "horeca". */

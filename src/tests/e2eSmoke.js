@@ -7,7 +7,7 @@ import { Warehouse } from "../modules/inventory/warehouse.model.js";
 import { Inventory } from "../modules/inventory/inventory.model.js";
 import { Settings } from "../modules/settings/settings.model.js";
 import { Order } from "../modules/orders/order.model.js";
-import { Invoice } from "../modules/invoices/invoice.model.js";
+import { Invoice, CreditNote } from "../modules/invoices/invoice.model.js";
 import { Coupon } from "../modules/pricing/coupon.model.js";
 import { Category } from "../modules/catalog/category.model.js";
 
@@ -331,21 +331,27 @@ try {
   await expectFail("double confirm rejected", `/api/v1/orders/${oAcme._id}/status`, { method: "POST", token: vendor.accessToken, body: { status: "confirmed" } }, { status: 400 });
 
   const invA = await req(`/api/v1/orders/${oAcme._id}/invoice`, { token: B });
-  check(/^INV\/ACMEWHOLESALE\/\d{4}-\d{2}\/\d{6}$/.test(invA.invoiceNumber), `invoice number ${invA.invoiceNumber}`);
-  check(near(invA.totals.grandTotal, oAcme.total), "invoice total = order total (Acme)", [invA.totals.grandTotal, oAcme.total]);
+  check(/^[A-Z0-9]{1,4}\/\d{4}\/\d{6}$/.test(invA.invoiceNumber), `invoice number ${invA.invoiceNumber}`);
+  // Phase 4 split invoicing: seller invoice (goods + own delivery) + platform invoice (platform / partner fees).
+  const docsA = await req(`/api/v1/orders/${oAcme._id}/invoices`, { token: B });
+  const platA = docsA.find((d) => d.type === "platform");
+  check(near(invA.totals.grandTotal + (platA?.totals.grandTotal || 0), oAcme.total), "seller + platform invoice totals = order total (Acme)", [invA.totals.grandTotal, platA?.totals.grandTotal, oAcme.total]);
   check(invA.supplyType === "intra" && invA.totals.igst === 0 && near(invA.totals.cgst + invA.totals.sgst, invA.totals.tax), "DL seller → DL buyer: CGST + SGST");
-  check(invA.lines.some((l) => l.kind === "fee" && l.description === "Platform fee"), "platform fee appears as an invoice fee line");
+  check(platA && platA.lines.some((l) => l.kind === "fee" && l.description === "Platform fee" && l.hsn === "998599"), "platform fee appears on the platform invoice (SAC 998599)");
   check(invA.buyer.gstin === "07AAFCR4321K1ZD" && invA.seller.gstin === "07AABCA1234A1ZL", "buyer and seller GSTINs on the invoice", [invA.buyer.gstin, invA.seller.gstin]);
 
   await req(`/api/v1/orders/${oSmoke._id}/status`, { method: "POST", token: admin.accessToken, body: { status: "confirmed" } });
   const invS = await req(`/api/v1/orders/${oSmoke._id}/invoice`, { token: admin.accessToken });
-  check(near(invS.totals.grandTotal, oSmoke.total), "invoice total = order total (Mumbai seller)");
+  const platS = (await req(`/api/v1/orders/${oSmoke._id}/invoices`, { token: admin.accessToken })).find((d) => d.type === "platform");
+  check(near(invS.totals.grandTotal + (platS?.totals.grandTotal || 0), oSmoke.total), "seller + platform invoice totals = order total (Mumbai seller)");
   check(invS.supplyType === "inter" && invS.totals.cgst === 0 && near(invS.totals.igst, invS.totals.tax), "MH seller → DL buyer: IGST");
 
   const cancelled = await req(`/api/v1/orders/${oSmoke._id}/status`, { method: "POST", token: B, body: { status: "cancelled", note: "smoke" } });
   check(cancelled.status === "cancelled", "buyer can cancel a confirmed order");
   const invAfter = await Invoice.findOne({ orderId: oSmoke._id });
-  check(invAfter.status === "cancelled", "cancelling marks the invoice cancelled");
+  check(invAfter.status === "issued", "cancelling keeps the issued invoice (not voided)", invAfter.status);
+  const cnAfter = await CreditNote.findOne({ orderId: oSmoke._id });
+  check(!!cnAfter, "cancelling a confirmed order issues a credit note");
   await expectFail("buyer cannot ship", `/api/v1/orders/${oAcme._id}/status`, { method: "POST", token: B, body: { status: "processing" } }, { status: 403 });
 
   console.log("Returns");
@@ -376,7 +382,7 @@ try {
   await expectFail(
     "another store's category can't be used",
     `/api/v1/products/${p2._id}`,
-    { method: "PATCH", token: admin.accessToken, headers: { "X-Tenant-Id": String(tenant2._id) }, body: { categoryId: ownCat._id } },
+    { method: "PATCH", token: admin.accessToken, headers: { "X-Tenant-Id": String(tenant2._id), "X-Admin-Reason": "smoke test" }, body: { categoryId: ownCat._id } },
     { status: 400 }
   );
   await req(`/api/v1/categories/${ownCat._id}`, { method: "DELETE", token: vendor.accessToken });

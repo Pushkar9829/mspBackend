@@ -39,7 +39,7 @@ export const announcementSchema = z.object({
     }),
 });
 
-const channelPatch = z.object({ inApp: z.boolean().optional(), email: z.boolean().optional(), sms: z.boolean().optional() }).strict();
+const channelPatch = z.object({ inApp: z.boolean().optional(), email: z.boolean().optional(), sms: z.boolean().optional(), push: z.boolean().optional() }).strict();
 
 export const preferencesSchema = z.object({
   body: body(Object.fromEntries(NOTIFICATION_CATEGORIES.map((c) => [c, channelPatch.optional()]))),

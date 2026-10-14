@@ -3,9 +3,9 @@
  * invoice / credit note without adding a PDF library.
  */
 
-const PAGE_W = 595;
+export const PAGE_W = 595;
 const PAGE_H = 842;
-const MARGIN = 40;
+export const MARGIN = 40;
 
 function ascii(value) {
   return String(value ?? "")
@@ -27,7 +27,8 @@ function textWidth(text, size) {
   return ascii(text).length * size * 0.5;
 }
 
-class Doc {
+/** Exported for other simple text documents (seller statements). */
+export class Doc {
   constructor() {
     this.pages = [];
     this.newPage();
@@ -102,7 +103,7 @@ class Doc {
 }
 
 /** Render an Invoice or CreditNote document to a PDF buffer. */
-export function renderTaxDocumentPdf(docData, { title = "TAX INVOICE", number, date } = {}) {
+export function renderTaxDocumentPdf(docData, { title = "TAX INVOICE", number, date, supplierLabel = "Seller", footer = "" } = {}) {
   const d = typeof docData?.toObject === "function" ? docData.toObject() : docData || {};
   const pdf = new Doc();
   const L = MARGIN;
@@ -127,10 +128,16 @@ export function renderTaxDocumentPdf(docData, { title = "TAX INVOICE", number, d
   const seller = d.seller || {};
   const buyer = d.buyer || {};
   const half = W / 2;
-  pdf.text(L, "Seller", { bold: true });
+  pdf.text(L, supplierLabel, { bold: true });
   pdf.text(L + half, "Bill to", { bold: true });
   pdf.line(12);
-  const left = [seller.legalName || seller.name, seller.address, seller.state && `State: ${seller.state}`, seller.gstin && `GSTIN: ${seller.gstin}`];
+  const left = [
+    seller.legalName || seller.name,
+    seller.address,
+    seller.state && `State: ${seller.state}`,
+    seller.gstin && `GSTIN: ${seller.gstin}`,
+    seller.fssai && `FSSAI Lic. No.: ${seller.fssai}`,
+  ];
   const right = [buyer.company || buyer.name, buyer.address, buyer.state && `State: ${buyer.state}`, buyer.gstin && `GSTIN: ${buyer.gstin}`];
   for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
     if (left[i]) pdf.text(L, String(left[i]).slice(0, 60));
@@ -181,6 +188,10 @@ export function renderTaxDocumentPdf(docData, { title = "TAX INVOICE", number, d
     pdf.line(13);
   }
   pdf.line(10);
+  if (footer) {
+    pdf.text(L, footer, { size: 8 });
+    pdf.line(11);
+  }
   pdf.text(L, "Prices are inclusive of GST. This is a computer-generated document.", { size: 8 });
   return pdf.render();
 }

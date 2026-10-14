@@ -14,6 +14,9 @@ import { env } from "../../config/env.js";
  *   MSG91_TEMPLATE_ORDER_REFUNDED       – refund issued
  *   MSG91_TEMPLATE_PAYMENT_RECEIVED     – payment received
  *   MSG91_TEMPLATE_ACCOUNT_ALERT        – account / store alerts (e.g. store suspended)
+ *   MSG91_TEMPLATE_LOGIN_OTP            – rider mobile login code (phase 5; vars otp)
+ *   MSG91_TEMPLATE_DELIVERY_OTP         – buyer delivery code for an own-rider delivery (phase 5;
+ *                                         vars order, otp, rider, phone)
  *
  * Template variables sent with every message: name, order, amount, status, message
  * (also var1=order, var2=amount, var3=status for templates using positional names).
@@ -29,6 +32,8 @@ export const SMS_TEMPLATE_ENV = {
   ORDER_REFUNDED: "MSG91_TEMPLATE_ORDER_REFUNDED",
   PAYMENT_RECEIVED: "MSG91_TEMPLATE_PAYMENT_RECEIVED",
   ACCOUNT_ALERT: "MSG91_TEMPLATE_ACCOUNT_ALERT",
+  LOGIN_OTP: "MSG91_TEMPLATE_LOGIN_OTP",
+  DELIVERY_OTP: "MSG91_TEMPLATE_DELIVERY_OTP",
 };
 
 const FALLBACK = {
@@ -89,6 +94,10 @@ export async function sendSms({ phone, kind, vars = {}, message = "" }) {
     var2: String(vars.amount ?? ""),
     var3: String(vars.status || ""),
   };
+  // One-time codes (phase 5) and the rider's name / phone for delivery codes.
+  if (vars.otp !== undefined) recipient.otp = String(vars.otp);
+  if (vars.rider !== undefined) recipient.rider = String(vars.rider).slice(0, 30);
+  if (vars.phone !== undefined) recipient.phone = String(vars.phone);
   const response = await fetch("https://control.msg91.com/api/v5/flow/", {
     method: "POST",
     headers: {

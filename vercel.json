@@ -13,6 +13,14 @@
     { "path": "/api/internal/cron/scheduled-publish", "schedule": "*/5 * * * *" },
     { "path": "/api/internal/cron/low-stock", "schedule": "*/15 * * * *" },
     { "path": "/api/internal/cron/retry-events", "schedule": "*/10 * * * *" },
+    { "path": "/api/internal/cron/order-sla", "schedule": "*/15 * * * *" },
+    { "path": "/api/internal/cron/returns-sla", "schedule": "*/15 * * * *" },
+    { "path": "/api/internal/cron/disputes-sla", "schedule": "*/15 * * * *" },
+    { "path": "/api/internal/cron/fssai-compliance", "schedule": "0 21 * * *" },
+    { "path": "/api/internal/cron/billing-renewals", "schedule": "7 * * * *" },
+    { "path": "/api/internal/cron/payout-reconcile", "schedule": "45 22 * * *" },
+    { "path": "/api/internal/cron/payouts", "schedule": "30 4 * * *" },
+    { "path": "/api/internal/cron/linked-accounts-sync", "schedule": "20 * * * *" },
     { "path": "/api/internal/cron/cleanup", "schedule": "30 21 * * *" }
   ]
 }

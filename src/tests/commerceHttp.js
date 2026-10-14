@@ -214,7 +214,7 @@ async function main() {
   check(res.headers.get("x-export-total") === "1" && !res.headers.get("x-export-truncated"), "export total header, not truncated");
   res = await call("GET", "/reports/export/orders?fulfillmentMode=store_pickup", { token: manager.token });
   check(res.data.split("\n").length === 2, "export honours fulfillmentMode");
-  const bulkTenant = await Tenant.create({ name: "Bulk", slug: `bulk-${Date.now()}` });
+  const bulkTenant = await Tenant.create({ name: "Bulk", slug: `bulk-${Date.now()}`, status: "active" });
   const template = await Order.findById(o1._id).lean();
   await Order.collection.insertMany(
     Array.from({ length: 1005 }, (_, i) => ({ ...template, _id: new mongoose.Types.ObjectId(), tenantId: bulkTenant._id, orderNumber: `BULK-${i}`, idempotencyKey: `bulk-${i}` }))
@@ -369,7 +369,7 @@ async function main() {
   res = await call("GET", "/offers", { token: manager.token });
   check(res.data.data.every((o) => String(o.tenantId._id) === String(a.tenant._id)), "staff still see only their store's offers");
   res = await call("POST", `/offers/${offA._id}/approve`, { token: managerB.token });
-  check(res.status === 404, "another store cannot approve the offer");
+  check(res.status === 403, "store staff (even with pricing.approve) cannot approve offers (QA Q1: platform only)");
   res = await call("POST", `/offers/${offA._id}/approve`, { token: adminTok });
   check(res.status === 200 && res.data.status === "active", "platform admin approves cross-tenant without X-Tenant-Id");
   res = await call("POST", `/offers/${offA._id}/approve`, { token: adminTok });

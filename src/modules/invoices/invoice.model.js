@@ -31,6 +31,8 @@ const partySchema = new mongoose.Schema(
     address: String,
     email: String,
     phone: String,
+    /** Seller FSSAI licence number (food orders). */
+    fssai: String,
   },
   { _id: false }
 );
@@ -56,6 +58,11 @@ const invoiceSchema = new mongoose.Schema(
     paymentMethod: String,
     poNumber: String,
     couponCode: String,
+    /**
+     * combined = pre-phase-4 invoice carrying every fee (platform + partner too); split = seller
+     * invoice with goods + the seller's own delivery charge (platform fees on PlatformOrderInvoice).
+     */
+    feeLayout: { type: String, enum: ["combined", "split"], default: "combined" },
     lines: [invoiceLineSchema],
     totals: {
       grossAmount: Number,
@@ -78,6 +85,8 @@ const counterSchema = new mongoose.Schema({
   tenantId: { type: mongoose.Schema.Types.ObjectId, ref: "Tenant", required: true },
   financialYear: { type: String, required: true },
   seq: { type: Number, default: 0 },
+  /** Short store code used in document numbers of this series (fixed for the financial year). */
+  code: { type: String, default: "" },
 });
 counterSchema.index({ tenantId: 1, financialYear: 1 }, { unique: true });
 
@@ -96,6 +105,10 @@ const creditNoteSchema = new mongoose.Schema(
     /** One credit note per refund intent (order refund key). */
     reason: { type: String, default: "" },
     refundKey: { type: String, required: true },
+    /** full = whole invoice reversed; partial = only some lines / part of the fees (returns). */
+    scope: { type: String, enum: ["full", "partial"], default: "full" },
+    /** Order return record this note covers (partial returns). */
+    returnId: { type: mongoose.Schema.Types.ObjectId, default: null },
     financialYear: { type: String, required: true },
     sequence: { type: Number, required: true },
     issuedAt: { type: Date, default: Date.now },

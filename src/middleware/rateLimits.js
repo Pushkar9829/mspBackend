@@ -1,13 +1,15 @@
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
+import { verifyAccessToken } from "../utils/tokens.js";
 
 /**
  * NOTE: the default store is in-memory, i.e. per process. On multiple instances / serverless each
  * instance counts separately. Use a shared store (e.g. rate-limit-redis) when scaling out.
  */
-function limiter({ windowMs, max, message }) {
+function limiter({ windowMs, max, message, keyGenerator }) {
   return rateLimit({
     windowMs,
     limit: max,
+    ...(keyGenerator ? { keyGenerator } : {}),
     standardHeaders: "draft-7",
     legacyHeaders: false,
     message: { message, code: "RATE_LIMIT" },
@@ -24,7 +26,23 @@ export const sensitiveLimiter = limiter({ windowMs: 15 * 60 * 1000, max: 10, mes
 
 export const couponLimiter = limiter({ windowMs: 60 * 1000, max: 30, message: "Too many coupon checks" });
 export const chatLimiter = limiter({ windowMs: 60 * 1000, max: 60, message: "Too many chat requests" });
-export const searchLimiter = limiter({ windowMs: 60 * 1000, max: 120, message: "Too many search requests" });
+/**
+ * Signed-in shoppers are counted per account (a whole office behind one IP doesn't share one
+ * budget); anonymous visitors per IP. An invalid / expired token falls back to the IP.
+ */
+function userOrIpKey(req) {
+  const auth = String(req.headers?.authorization || "");
+  if (auth.startsWith("Bearer ")) {
+    try {
+      const claims = verifyAccessToken(auth.slice(7));
+      if (claims?.sub) return `u:${claims.sub}`;
+    } catch {
+      /* fall back to the IP */
+    }
+  }
+  return ipKeyGenerator(req.ip || "");
+}
+export const searchLimiter = limiter({ windowMs: 60 * 1000, max: 120, message: "Too many search requests", keyGenerator: userOrIpKey });
 export const publicWriteLimiter = limiter({ windowMs: 60 * 60 * 1000, max: 20, message: "Too many requests" });
 export const restockLimiter = limiter({ windowMs: 60 * 60 * 1000, max: 10, message: "Too many restock alert requests" });
 export const reviewLimiter = limiter({ windowMs: 60 * 60 * 1000, max: 10, message: "Too many reviews" });

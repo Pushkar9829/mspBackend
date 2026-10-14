@@ -106,6 +106,7 @@ Permission catalog: `src/config/constants.js` (`PERMISSIONS`). Tenant admins get
 
 - **Render** (`render.yaml`): `NODE_ENV=production`, health check `/api/ready`, every variable declared (`sync: false` → set in dashboard). Free plan sleeps: in-process cron pauses; use a paid plan or an external scheduler calling the cron endpoint.
 - **Vercel** (`vercel.json`, `api/index.js`): no WebSockets (Socket.IO needs a long-running server), no in-process cron — `crons` call `/api/internal/cron/{reservation-timeout,scheduled-publish,low-stock,retry-events,cleanup}`. Sub-daily schedules need a Pro plan (Hobby allows daily crons only); otherwise point an external scheduler (e.g. cron-job.org) at the endpoint with the bearer secret.
+- **Shiprocket Quick** (`SHIPROCKET_EMAIL` + `SHIPROCKET_PASSWORD`): home delivery is quoted and booked with Shiprocket. Each store pickup address is registered as its own pickup location. Tracking webhook is `POST /api/v1/shipping/events` with header `x-api-key: $SHIPROCKET_WEBHOOK_TOKEN` (the URL must not contain the words shiprocket, kartrocket, sr, or kr). Store pickup still does not book a rider.
 - **Process:** `unhandledRejection`/`uncaughtException` are logged; SIGTERM/SIGINT stop cron (`stopJobs`), close sockets and HTTP, disconnect Mongo (10 s hard timeout).
 - **Startup (`prepareRuntime`):** connect → warn if not a replica set → permission catalog + system roles sync → optional seed (`SEED_ON_START`, demo only with `SEED_DEMO` and never in production) → auth migrations (`RUN_MIGRATIONS`, default on) → `syncIndexes()` for all models (`SYNC_INDEXES`, default on outside production) → `ensureProductSlugs()`.
 - **Logging:** one JSON line per request (`requestId, method, path, status, ms, userId`); level via `LOG_LEVEL`.
@@ -113,7 +114,7 @@ Permission catalog: `src/config/constants.js` (`PERMISSIONS`). Tenant admins get
 
 ### Required environment (production)
 
-`NODE_ENV=production`, `MONGODB_URI` (replica set/Atlas), `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET` (≥ 32 chars, different, not the example values — startup fails otherwise), `SUPER_ADMIN_EMAIL`, `SUPER_ADMIN_PASSWORD` (≥ 12 chars, non-default), `CORS_ORIGIN` / `FRONTEND_URL` (exact origins), `CRON_SECRET`, `COOKIE_SAMESITE=none` + `COOKIE_SECURE=true` for a cross-site frontend, `SMTP_*` (verification/reset mail), plus `RAZORPAY_*`, `MSG91_AUTH_KEY` + `MSG91_DLT_ENTITY_ID` + `MSG91_TEMPLATE_<EVENT>` DLT template ids, `NOTIFICATION_UNSUBSCRIBE_SECRET`, `DELHIVERY_*`, `MAPS_API_KEY`, `PUBLIC_API_URL` as used. Full list: `.env.example`.
+`NODE_ENV=production`, `MONGODB_URI` (replica set/Atlas), `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET` (≥ 32 chars, different, not the example values — startup fails otherwise), `SUPER_ADMIN_EMAIL`, `SUPER_ADMIN_PASSWORD` (≥ 12 chars, non-default), `CORS_ORIGIN` / `FRONTEND_URL` (exact origins), `CRON_SECRET`, `COOKIE_SAMESITE=none` + `COOKIE_SECURE=true` for a cross-site frontend, `SMTP_*` (verification/reset mail), plus `RAZORPAY_*`, `MSG91_AUTH_KEY` + `MSG91_DLT_ENTITY_ID` + `MSG91_TEMPLATE_<EVENT>` DLT template ids, `NOTIFICATION_UNSUBSCRIBE_SECRET`, `DELHIVERY_*`, `SHIPROCKET_EMAIL`, `SHIPROCKET_PASSWORD`, `SHIPROCKET_WEBHOOK_TOKEN`, `MAPS_API_KEY`, `PUBLIC_API_URL` as used. Full list: `.env.example`.
 
 ## Settings
 
@@ -282,7 +283,7 @@ Auth: same as checkout (buyer with `orders.create`; verified email when required
   defaultMethod }
 ```
 How each method is decided:
-- `upi`, `card`, `netbanking`: allowed when Razorpay is configured. Otherwise `code: PAYMENT_UNAVAILABLE`.
+- `upi`, `card`, `netbanking`: allowed when Razorpay is configured. Otherwise `code: PAYMENT_UNAVAILABLE`. The server creates the Razorpay order for the exact paise total. `POST /checkout/verify` checks the checkout signature, then reads the payment from Razorpay and captures it if it is only authorized. The order is marked paid from that amount, not from the browser. The webhook at `POST /checkout/razorpay/webhook` does the same after checking `x-razorpay-signature`.
 - `cod`: allowed when both the store and the platform allow COD. Otherwise `COD_DISABLED`.
 - `credit_terms` / `purchase_order`: allowed when the store enabled the term for this buyer (otherwise `TERMS_NOT_ENABLED`) and `spendable` covers the group total (otherwise `INSUFFICIENT_CREDIT`).
 

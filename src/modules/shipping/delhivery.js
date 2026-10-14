@@ -164,13 +164,17 @@ export async function cancelShipment(waybill) {
  * Map a Delhivery scan status to an order status (null = informational only).
  * StatusType: UD = forward (undelivered / in transit), DL = final (Delivered, or RTO / DTO when
  * the parcel went back), RT = return to origin in progress, PU = reverse pickup, CN = cancelled.
- * Any RTO / DTO / RT scan means the parcel is going (or went) back to the store, never "delivered".
+ * Any RTO / DTO / RT scan means the parcel is going back (rto_in_transit) or reached the store
+ * (returned_to_origin: DL + RTO/DTO, "RTO delivered"), never "delivered".
  * Only UD / DL scans (or scans without a type) move an order forward.
  */
 export function mapDelhiveryStatus(status, statusType = "") {
   const s = String(status || "").trim().toLowerCase().replace(/\s+/g, " ");
   const t = String(statusType || "").trim().toUpperCase();
-  if (t === "RT" || s.startsWith("rto") || s.startsWith("dto") || s === "returned") return "returned_to_origin";
+  // RTO / DTO with a final (DL) scan, or "returned": the parcel is back at the seller.
+  if ((t === "DL" && (s.startsWith("rto") || s.startsWith("dto"))) || s === "returned" || s === "rto delivered") return "returned_to_origin";
+  // Any other RT / RTO scan: the parcel is on its way back (nothing is restocked or refunded yet).
+  if (t === "RT" || s.startsWith("rto") || s.startsWith("dto")) return "rto_in_transit";
   if (t && t !== "UD" && t !== "DL") return null;
   if (s === "delivered" || (t === "DL" && !s)) return "delivered";
   if (t === "DL") return null;

@@ -6,9 +6,9 @@ import { storage } from "./utils/storage.js";
 import { logger } from "./utils/logger.js";
 import { ensureSystemRoles, seedFoundation, seedDemoCatalog } from "./seeds/index.js";
 import { registerNotificationListeners } from "./modules/notifications/service.js";
-import { runAuthMigrations, runStorefrontMigrations, syncAllIndexes } from "./seeds/migrations.js";
+import { runAuthMigrations, runStorefrontMigrations, runTenantMigrations, syncAllIndexes } from "./seeds/migrations.js";
 
-export { runAuthMigrations, runStorefrontMigrations, syncAllIndexes };
+export { runAuthMigrations, runStorefrontMigrations, runTenantMigrations, syncAllIndexes };
 
 export const app = createApp();
 
@@ -107,9 +107,16 @@ export function prepareRuntime({ seed = env.seedOnStart, demo = env.seedDemo } =
       }
       if (process.env.RUN_MIGRATIONS !== "false") {
         await runAuthMigrations().catch((err) => logger.error("auth migrations failed", { err: err.message }));
+        await runTenantMigrations().catch((err) => logger.error("tenant migrations failed", { err: err.message }));
+        // Seller billing: legacy plan + legacy subscription for every existing store (idempotent).
+        await (await import("./modules/billing/migrate.js")).runBillingMigrations().catch((err) => logger.error("billing migrations failed", { err: err.message }));
         await runStorefrontMigrations().catch((err) => logger.error("storefront migrations failed", { err: err.message }));
         await runLedgerMigrations().catch((err) => logger.error("ledger migrations failed", { err: err.message }));
         await backfillDelhiveryCarrier().catch((err) => logger.error("carrier backfill failed", { err: err.message }));
+        // Platform-only fee keys: remove stale store overrides (reads already ignore them).
+        await (await import("./modules/settings/service.js")).runSettingsMigrations().catch((err) => logger.error("settings migrations failed", { err: err.message }));
+        // Seller payouts: fix payouts.startDate on the first run (orders before it stay off the seller ledger).
+        await (await import("./modules/payouts/settings.js")).runPayoutMigrations().catch((err) => logger.error("payout migrations failed", { err: err.message }));
       }
       if (env.syncIndexes) await syncAllIndexes();
       try {

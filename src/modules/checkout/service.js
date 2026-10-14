@@ -9,7 +9,14 @@ import { Cart } from "../cart/cart.model.js";
 import { Tenant } from "../tenants/tenant.model.js";
 import { storeCards } from "../tenants/storeCard.js";
 import { User } from "../users/user.model.js";
-import { getOrCreateCart, quoteCart, resolveFulfillment, transferLineHoldToOrder, touchCartHolds } from "../cart/service.js";
+import {
+  getOrCreateCart,
+  quoteCart,
+  resolveFulfillment,
+  transferLineHoldToOrder,
+  touchCartHolds,
+  sellingTenantIds,
+} from "../cart/service.js";
 import { releaseCartHold } from "../inventory/service.js";
 import { getAddressForUser } from "../location/address.service.js";
 import { withTransaction, afterCommit } from "../../utils/transaction.js";
@@ -18,6 +25,9 @@ import { emitDomain } from "../../utils/events.js";
 import { orderUpdatedAfterCommit } from "../orders/events.js";
 import { PAYMENT_METHODS } from "../../config/constants.js";
 import * as ledger from "../ledger/service.js";
+import { hasFeature } from "../billing/entitlements.js";
+
+const PLAN_NO_CREDIT_REASON = "This store does not offer credit terms or purchase orders on its current plan";
 import { ONLINE_PAYMENT_METHODS, toPaise, razorpayConfigured } from "./razorpayApi.js";
 import { checkoutGroups } from "../orders/totals.js";
 import { round2 } from "../pricing/engine.js";
@@ -55,8 +65,32 @@ function formatAddress(a = {}) {
   return [a.addressLine1, a.addressLine2, a.city, a.state, a.postalCode].filter(Boolean).join(", ");
 }
 
-async function sellerSnapshots(tenantIds) {
+/** Tenant ids (strings) whose quote group contains at least one product of an FSSAI (food) category. */
+async function foodTenantIds(groups) {
+  const productIds = groups.flatMap((g) => (g.items || []).map((i) => i.productId)).filter(Boolean);
+  if (!productIds.length) return new Set();
+  const [{ Product }, { foodCategoryIds }] = await Promise.all([
+    import("../catalog/product.model.js"),
+    import("../catalog/compliance.js"),
+  ]);
+  const food = await foodCategoryIds();
+  if (!food.size) return new Set();
+  const rows = await Product.find({ _id: { $in: productIds } }).select("tenantId categoryId").lean();
+  return new Set(rows.filter((p) => p.categoryId && food.has(String(p.categoryId))).map((p) => String(p.tenantId)));
+}
+
+/**
+ * Seller snapshot per store. `fssai` (licence number) is snapshotted only for stores whose order
+ * contains food (FSSAI category) lines; it is printed on the invoice.
+ */
+async function sellerSnapshots(tenantIds, foodTenants = new Set()) {
   const tenants = await Tenant.find({ _id: { $in: tenantIds } }).lean();
+  // Defence in depth: quoteCart already lists lines of non-selling stores as STORE_INACTIVE.
+  const selling = await sellingTenantIds(tenantIds);
+  const blocked = tenantIds.find((id) => !selling.has(String(id)));
+  if (blocked) {
+    throw new AppError(409, "A store in your cart is not accepting orders right now. Remove its items and try again.", "STORE_INACTIVE");
+  }
   const map = new Map();
   for (const t of tenants) {
     map.set(String(t._id), {
@@ -68,6 +102,7 @@ async function sellerSnapshots(tenantIds) {
       address: formatAddress(t.pickupAddress),
       email: t.businessProfile?.email || "",
       phone: t.businessProfile?.phone || "",
+      fssai: foodTenants.has(String(t._id)) ? String(t.kyc?.fssai?.number || "") : "",
     });
   }
   return map;
@@ -103,6 +138,8 @@ export async function paymentOptions({ user, addressId }) {
   const online = razorpayConfigured();
   const tenantIds = quote.groups.map((g) => g.tenantId);
   const ledgers = await Promise.all(tenantIds.map((tenantId) => ledger.findLedger(user._id, tenantId)));
+  // Plan feature `creditTerms` of each seller: without it credit / PO are unavailable for that store.
+  const creditPlans = await Promise.all(tenantIds.map((tenantId) => hasFeature(tenantId, "creditTerms")));
   const groups = quote.groups.map((group, index) => {
     const account = ledgers[index];
     const terms = account?.buyerTerms || {};
@@ -121,6 +158,10 @@ export async function paymentOptions({ user, addressId }) {
         enabled = false;
         reason = "This store does not offer cash on delivery";
         code = "COD_DISABLED";
+      } else if (ledger.LEDGER_PAYMENT_METHODS.includes(method) && !creditPlans[index]) {
+        enabled = false;
+        reason = PLAN_NO_CREDIT_REASON;
+        code = "PLAN_FEATURE_REQUIRED";
       } else if (ledger.LEDGER_PAYMENT_METHODS.includes(method)) {
         const allowed = method === "credit_terms" ? terms.creditEnabled : terms.purchaseOrderEnabled;
         if (!allowed) {
@@ -132,7 +173,7 @@ export async function paymentOptions({ user, addressId }) {
           code = "TERMS_NOT_ENABLED";
         } else if (spendable < needed) {
           enabled = false;
-          reason = `Credit limit exceeded. Available balance is ₹${(spendable / 100).toFixed(2)}.`;
+          reason = `Credit limit exceeded. Available balance is ${ledger.formatPaise(spendable)}.`;
           code = "INSUFFICIENT_CREDIT";
         }
       }
@@ -309,11 +350,15 @@ export async function checkout({
   }
   if (ledger.LEDGER_PAYMENT_METHODS.includes(paymentMethod)) {
     for (const group of quote.groups) {
+      if (!(await hasFeature(group.tenantId, "creditTerms"))) {
+        const name = group.store?.name ? `${group.store.name}: ` : "";
+        throw new AppError(403, `${name}${PLAN_NO_CREDIT_REASON}`, "PLAN_FEATURE_REQUIRED", { feature: "creditTerms", tenantId: group.tenantId });
+      }
       const account = await ledger.assertTermsAllowed({ userId: user._id, tenantId: group.tenantId, paymentMethod });
       // Spending power = unused credit + advance (overpayment) held for this buyer.
       const available = ledger.spendablePaise(account);
       if (available < toPaise(group.total)) {
-        throw new AppError(402, `Credit limit exceeded. Available balance is ₹${(available / 100).toFixed(2)}.`, "INSUFFICIENT_CREDIT");
+        throw new AppError(402, `Credit limit exceeded. Available balance is ${ledger.formatPaise(available)}.`, "INSUFFICIENT_CREDIT");
       }
     }
   }
@@ -326,7 +371,7 @@ export async function checkout({
     phone: buyer?.phone || address.phone || "",
     gstin: buyer?.profile?.gstin || "",
   };
-  const sellers = await sellerSnapshots(quote.groups.map((g) => g.tenantId));
+  const sellers = await sellerSnapshots(quote.groups.map((g) => g.tenantId), await foodTenantIds(quote.groups));
   const online = ONLINE_PAYMENT_METHODS.includes(paymentMethod);
   const addressPlain = address.toObject ? address.toObject() : address;
 
@@ -366,6 +411,7 @@ export async function checkout({
           deliveryFee: group.deliveryFee,
           platformFee: group.platformFee || 0,
           partnerFee: group.partnerFee || 0,
+          deliveryMethod: group.deliveryMethod || "",
           deliveryPartner: group.deliveryPartner
             ? { id: group.deliveryPartner.id, name: group.deliveryPartner.name, fee: group.deliveryPartner.fee }
             : undefined,

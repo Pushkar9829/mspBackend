@@ -5,6 +5,7 @@ import { SYSTEM_ROLES } from "../config/constants.js";
 import { Settings } from "../modules/settings/settings.model.js";
 import { Order } from "../modules/orders/order.model.js";
 import { Product } from "../modules/catalog/product.model.js";
+import { Tenant } from "../modules/tenants/tenant.model.js";
 import { normalizeAddressStates } from "../modules/location/address.service.js";
 import { invalidateSettingCache } from "../modules/settings/service.js";
 import { repairDeep, repairMojibake, MOJIBAKE_MARKER_DB } from "../utils/mojibake.js";
@@ -29,6 +30,31 @@ export async function runAuthMigrations() {
   if (verified.modifiedCount) logger.info("grandfathered email verification", { count: verified.modifiedCount });
   await User.updateMany({ status: "locked" }, { $set: { status: "active" } });
   await User.updateMany({ tokenVersion: { $exists: false } }, { $set: { tokenVersion: 0 } });
+}
+
+/**
+ * Idempotent tenant-state migrations (phase 2). Cheap; safe on every start.
+ * - `trial` is retired: trial stores become `active` (statusHistory records the migration).
+ * Uses the raw collection so the removed enum value doesn't trip validation.
+ */
+export async function runTenantMigrations() {
+  const at = new Date();
+  const res = await Tenant.collection.updateMany(
+    { status: "trial" },
+    {
+      $set: { status: "active", statusChangedAt: at, statusReason: "" },
+      $push: { statusHistory: { from: "trial", to: "active", reason: "Trial status retired (migration)", by: null, at } },
+    }
+  );
+  if (res.modifiedCount) {
+    logger.info("migrated trial stores to active", { count: res.modifiedCount });
+    try {
+      (await import("../modules/catalog/service.js")).invalidateActiveTenants();
+    } catch {
+      /* optional */
+    }
+  }
+  return { trialToActive: res.modifiedCount || 0 };
 }
 
 /**

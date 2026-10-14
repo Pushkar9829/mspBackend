@@ -20,6 +20,7 @@ import { Product } from "../catalog/product.model.js";
 import { Brand } from "../catalog/brand.model.js";
 import { Category } from "../catalog/category.model.js";
 import { Tenant } from "../tenants/tenant.model.js";
+import { SELLING_TENANT_STATUSES } from "../../config/constants.js";
 import { catalogVersion } from "./catalogVersion.js";
 
 export const FEW_RESULTS = 3;
@@ -137,7 +138,7 @@ let building = null;
 
 async function buildDictionary() {
   const version = catalogVersion();
-  const tenantIds = await Tenant.find({ status: { $in: ["active", "trial"] } }).distinct("_id");
+  const tenantIds = await Tenant.find({ status: { $in: SELLING_TENANT_STATUSES } }).distinct("_id");
   const df = new Map();
   const add = (text, weight = 1) => {
     for (const t of new Set(tokenize(text))) {

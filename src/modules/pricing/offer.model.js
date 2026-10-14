@@ -15,7 +15,11 @@ const offerSchema = new mongoose.Schema(
     inventoryUsed: { type: Number, default: 0 },
     startsAt: { type: Date, required: true },
     endsAt: { type: Date, required: true },
-    status: { type: String, enum: ["draft", "active", "inactive", "pending_approval"], default: "draft" },
+    /** rejected: a platform admin turned the approval request down (reason below); the seller can edit and resubmit. */
+    status: { type: String, enum: ["draft", "active", "inactive", "pending_approval", "rejected"], default: "draft" },
+    rejectionReason: { type: String, default: "" },
+    rejectedAt: { type: Date, default: null },
+    rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
   },
   { timestamps: true }
 );

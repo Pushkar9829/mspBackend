@@ -19,6 +19,11 @@ export function fromPaise(paise) {
   return Math.round(Number(paise) || 0) / 100;
 }
 
+/** Money for messages / notes: ₹17,302.00 (en-IN grouping, 2 decimals). */
+export function formatPaise(paise) {
+  return `₹${fromPaise(paise).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
 function oid(value) {
   if (!value) return null;
   if (value instanceof mongoose.Types.ObjectId) return value;
@@ -153,7 +158,7 @@ export async function applyEntry({
     if (!updated) {
       throw new AppError(
         402,
-        `Credit limit exceeded. Available balance is ₹${fromPaise(spendablePaise(ledger)).toFixed(2)}.`,
+        `Credit limit exceeded. Available balance is ${formatPaise(debitAllowedPaise(ledger))}.`,
         "INSUFFICIENT_CREDIT"
       );
     }
@@ -296,6 +301,15 @@ export function spendablePaise(ledger) {
 }
 
 /**
+ * The largest debit the floor check in applyEntry accepts right now (raw balance + advance,
+ * never more than the spendable figure shown to the store). Same maths, exposed for messages / UI.
+ */
+export function debitAllowedPaise(ledger) {
+  const f = ledgerFigures(ledger);
+  return Math.max(0, Math.min(f.available + f.advance, f.balance + Math.max(0, ledger?.advancePaise || 0)));
+}
+
+/**
  * Public account shape (every ledger response uses it):
  *   creditLimit   the credit line the store granted
  *   outstanding   dues the buyer owes the store (creditLimit - balance, >= 0)
@@ -322,6 +336,9 @@ export function presentLedger(ledger) {
     advancePaise: f.advance,
     spendable: fromPaise(f.available + f.advance),
     spendablePaise: f.available + f.advance,
+    /** Largest manual debit (negative adjustment) the server accepts now. */
+    maxDebit: fromPaise(debitAllowedPaise(ledger)),
+    maxDebitPaise: debitAllowedPaise(ledger),
     balance: fromPaise(f.balance),
     balancePaise: f.balance,
     buyerTerms: ledger.buyerTerms || {},
@@ -517,7 +534,7 @@ export async function setBuyerTerms(req, userId, { creditEnabled, purchaseOrderE
         type: delta > 0 ? "credit" : "debit",
         kind: "limit",
         amountPaise: Math.abs(delta),
-        note: `Credit limit set to ₹${fromPaise(set.creditLimitPaise).toFixed(2)}`,
+        note: `Credit limit set to ${formatPaise(set.creditLimitPaise)}`,
         actorId: req.user?._id,
         session,
       });
@@ -599,6 +616,24 @@ export async function adjustBalance(req, userId, { amount, note } = {}) {
   return presentLedger(ledger);
 }
 
+/**
+ * Credit-LINE entries (opening grant / limit change) don't move money the buyer owes or paid:
+ * flag them so statements show them as notes, not in the Debit / Credit columns. Amounts and
+ * running figures are unchanged.
+ */
+function statementRow(entry) {
+  if (movementFor(entry.type, entry.kind) !== "line") return entry;
+  const paise = entry.amountPaise ?? toPaise(entry.amount);
+  const sign = entry.type === "debit" ? "lowered" : "raised";
+  const fallback = entry.kind === "opening" ? `Credit line opened with ${formatPaise(paise)}` : `Credit limit ${sign} by ${formatPaise(paise)}`;
+  return {
+    ...entry,
+    limitChange: true,
+    limitDelta: fromPaise(entry.type === "debit" ? -paise : paise),
+    limitNote: entry.kind === "limit" && entry.note ? `${entry.note} (${sign} by ${formatPaise(paise)})` : fallback,
+  };
+}
+
 /** Statement: opening balance at `from`, entries in range (paginated), closing balance. */
 export async function getStatement(req, userId) {
   const buyer = await assertBuyer(userId, req.tenantId);
@@ -634,6 +669,6 @@ export async function getStatement(req, userId) {
     closingBalance: last ? fromPaise(last.balanceAfterPaise ?? toPaise(last.balanceAfter)) : account.balance,
     closingOutstanding: last ? fromPaise(last.outstandingAfterPaise || 0) : account.outstanding,
     closingAdvance: last ? fromPaise(last.advanceAfterPaise || 0) : account.advance,
-    ...paginated(entries, total, { page, limit }),
+    ...paginated(entries.map(statementRow), total, { page, limit }),
   };
 }

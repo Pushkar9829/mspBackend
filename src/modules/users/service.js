@@ -10,6 +10,7 @@ import { toPublicUser, SALT, bumpTokenVersion } from "../auth/service.js";
 import { assertRoleWithinActor } from "../rbac/service.js";
 import { Address } from "../location/address.model.js";
 import { SYSTEM_ROLES } from "../../config/constants.js";
+import { assertWithinLimit } from "../billing/entitlements.js";
 
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -46,6 +47,17 @@ function isBuyerRoleDoc(role) {
   return Boolean(role?.isSystem && role.slug === SYSTEM_ROLES.BUYER);
 }
 
+function isRiderRoleDoc(role) {
+  return Boolean(role?.isSystem && role.slug === SYSTEM_ROLES.RIDER);
+}
+
+/** Store staff manage riders through /riders (profile, activate / deactivate), not /users. */
+function assertNotRider(req, user) {
+  if (!req.isPlatformAdmin && isRiderRoleDoc(user?.roleId)) {
+    throw new AppError(403, "Manage riders from the Riders page", "RIDER_ACCOUNT");
+  }
+}
+
 /**
  * Check that `role` may be given to a user of `tenantId` by this actor.
  * - platform roles: platform admin only, user must have no tenant;
@@ -63,6 +75,14 @@ async function loadAssignableRole(req, roleId, tenantId) {
   // pre-verified buyers — buyers self-register (with email verification) or are created by platform admins.
   if (isBuyerRoleDoc(role) && !req.isPlatformAdmin) {
     throw new AppError(403, "Cannot assign the buyer role", "FORBIDDEN");
+  }
+  // Seller applicants become store admins only through application approval.
+  if (role.isSystem && role.slug === "seller_applicant") {
+    throw new AppError(403, "Cannot assign the seller applicant role", "FORBIDDEN");
+  }
+  // Riders (phase 5) are added on the Riders page (POST /riders), never as staff.
+  if (isRiderRoleDoc(role)) {
+    throw new AppError(403, "Riders are added from the Riders page, not as team members", "FORBIDDEN");
   }
   const systemTenantRole = role.isSystem && role.scope === "tenant" && !role.tenantId;
   const sameTenant = role.tenantId && tenantId && String(role.tenantId) === String(tenantId);
@@ -102,8 +122,11 @@ export async function listUsers(req) {
   if (req.query.staff === "true" || req.query.staff === "false") {
     const buyer = await Role.findOne({ slug: SYSTEM_ROLES.BUYER, isSystem: true }).select("_id");
     if (req.query.staff === "true") {
-      // Staff = store members (and platform users for platform admins); never marketplace buyers.
-      and.push(buyer ? { roleId: { $ne: buyer._id } } : {});
+      // Staff = store members (and platform users for platform admins); never marketplace buyers
+      // nor delivery riders (phase 5).
+      const rider = await Role.findOne({ slug: SYSTEM_ROLES.RIDER, isSystem: true }).select("_id");
+      const nonStaff = [buyer?._id, rider?._id].filter(Boolean);
+      and.push(nonStaff.length ? { roleId: { $nin: nonStaff } } : {});
     } else {
       and.push({ roleId: buyer ? buyer._id : null });
     }
@@ -205,6 +228,8 @@ export async function createUser(req, body) {
   } else if (!tenantId) {
     throw new AppError(400, "tenantId is required for tenant roles", "VALIDATION_ERROR");
   }
+  // Plan limit: active staff members of the store.
+  if (tenantId && (body.status || "active") === "active") await assertWithinLimit(tenantId, "staff", { req });
 
   const user = await User.create({
     name: body.name,
@@ -227,6 +252,7 @@ export async function updateUser(req, id, body) {
   const user = await User.findOne({ _id: id, ...manageFilter(req) }).populate("roleId");
   if (!user) throw new AppError(404, "User not found", "NOT_FOUND");
   const isSelf = String(user._id) === String(req.user._id);
+  assertNotRider(req, user);
   if (user.roleId) assertRoleWithinActor(req, user.roleId);
   if (!req.isPlatformAdmin && user.roleId?.scope === "platform") {
     throw new AppError(403, "Cannot edit platform users", "FORBIDDEN");
@@ -244,6 +270,8 @@ export async function updateUser(req, id, body) {
   }
   if (body.status && body.status !== user.status) {
     if (isSelf) throw new AppError(403, "You cannot change your own status", "FORBIDDEN");
+    // Re-activating a store member counts against the plan's staff limit.
+    if (body.status === "active" && user.tenantId) await assertWithinLimit(user.tenantId, "staff", { req });
     user.status = body.status;
     if (body.status !== "active") revoke = true;
   }
@@ -270,6 +298,7 @@ export async function deleteUser(req, id) {
   if (String(user._id) === String(req.user._id)) {
     throw new AppError(403, "You cannot deactivate your own account here", "FORBIDDEN");
   }
+  assertNotRider(req, user);
   if (user.roleId) assertRoleWithinActor(req, user.roleId);
   user.status = "suspended";
   await user.save();

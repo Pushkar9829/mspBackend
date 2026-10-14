@@ -180,6 +180,12 @@ export const env = {
   delhiveryBaseUrl: process.env.DELHIVERY_BASE_URL || "https://staging-express.delhivery.com",
   delhiveryPickupName: process.env.DELHIVERY_PICKUP_NAME || "",
   delhiveryWebhookSecret: process.env.DELHIVERY_WEBHOOK_SECRET || "",
+  /** Shiprocket API user (Settings → API), not the panel login. */
+  shiprocketEmail: process.env.SHIPROCKET_EMAIL || "",
+  shiprocketPassword: process.env.SHIPROCKET_PASSWORD || "",
+  shiprocketBaseUrl: process.env.SHIPROCKET_BASE_URL || "https://apiv2.shiprocket.in",
+  /** Sent by Shiprocket as `x-api-key` on POST /api/v1/shipping/events. */
+  shiprocketWebhookToken: process.env.SHIPROCKET_WEBHOOK_TOKEN || "",
 };
 
 /** Exact-match CORS check. Requests without Origin (curl, server-to-server, mobile) are allowed. */

@@ -3,7 +3,7 @@ import path from "path";
 import { nanoid } from "nanoid";
 import { env } from "../config/env.js";
 import { AppError } from "./AppError.js";
-import { ALLOWED_MIME, MAX_UPLOAD_BYTES, UPLOAD_FOLDERS } from "../config/constants.js";
+import { ALLOWED_MIME, MAX_UPLOAD_BYTES, UPLOAD_FOLDERS, PRIVATE_UPLOAD_FOLDERS } from "../config/constants.js";
 
 /**
  * Local-disk storage for uploads.
@@ -21,6 +21,23 @@ import { ALLOWED_MIME, MAX_UPLOAD_BYTES, UPLOAD_FOLDERS } from "../config/consta
  */
 
 export const uploadRoot = path.resolve(process.cwd(), env.uploadDir);
+
+/**
+ * Private uploads (KYC documents etc.): a SEPARATE directory next to the public one (default
+ * "<uploadDir>-private", or PRIVATE_UPLOAD_DIR). It is never mounted by the /uploads static route;
+ * files are streamed by GET /api/v1/files/private/:id after an ownership check.
+ */
+export const privateUploadRoot = path.resolve(
+  process.cwd(),
+  process.env.PRIVATE_UPLOAD_DIR || path.join(path.dirname(env.uploadDir), `${path.basename(env.uploadDir)}-private`)
+);
+if (privateUploadRoot === uploadRoot || privateUploadRoot.startsWith(uploadRoot + path.sep)) {
+  throw new Error("PRIVATE_UPLOAD_DIR must not be inside the public upload dir");
+}
+
+export function isPrivateFolder(folder) {
+  return PRIVATE_UPLOAD_FOLDERS.includes(String(folder || "").trim().toLowerCase());
+}
 
 const EXT_BY_MIME = {
   "image/jpeg": ".jpg",
@@ -55,13 +72,17 @@ export function isImageMime(mime) {
 
 export async function ensureUploadDir() {
   await fs.mkdir(uploadRoot, { recursive: true });
+  await fs.mkdir(privateUploadRoot, { recursive: true });
 }
 
 /**
  * Save an upload. `originalName` and `mimeType` from the client are accepted for API compatibility
- * but never trusted. Returns { key, url, filename, mimeType, size, folder, originalName }.
+ * but never trusted. Returns { key, url, filename, mimeType, size, folder, originalName, private }.
+ * Private folders (PRIVATE_UPLOAD_FOLDERS, e.g. "kyc") or `isPrivate: true` are written under
+ * privateUploadRoot and get `url: null` (the caller records the file and exposes
+ * /api/v1/files/private/:id).
  */
-export async function saveLocalFile({ buffer, originalName = "", folder = "general", maxBytes = MAX_UPLOAD_BYTES } = {}) {
+export async function saveLocalFile({ buffer, originalName = "", folder = "general", maxBytes = MAX_UPLOAD_BYTES, isPrivate = false } = {}) {
   if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
     throw new AppError(400, "File is empty", "FILE_EMPTY");
   }
@@ -74,18 +95,21 @@ export async function saveLocalFile({ buffer, originalName = "", folder = "gener
   }
 
   const safeFolder = normalizeFolder(folder);
-  const dir = path.join(uploadRoot, safeFolder);
+  const priv = Boolean(isPrivate) || isPrivateFolder(safeFolder);
+  const root = priv ? privateUploadRoot : uploadRoot;
+  const dir = path.join(root, safeFolder);
   await fs.mkdir(dir, { recursive: true });
   const filename = `${nanoid(16)}${EXT_BY_MIME[mimeType]}`;
   const full = path.join(dir, filename);
-  if (!full.startsWith(uploadRoot + path.sep)) {
+  if (!full.startsWith(root + path.sep)) {
     throw new AppError(400, "Invalid upload path", "UPLOAD_ERROR");
   }
   await fs.writeFile(full, buffer, { flag: "wx" });
   const key = `${safeFolder}/${filename}`;
   return {
     key,
-    url: `/uploads/${key}`,
+    url: priv ? null : `/uploads/${key}`,
+    private: priv,
     filename,
     mimeType,
     size: buffer.length,
@@ -94,11 +118,19 @@ export async function saveLocalFile({ buffer, originalName = "", folder = "gener
   };
 }
 
-/** Delete a stored file by key. Keys outside the upload root are ignored. */
-export async function deleteLocalFile(key) {
+/** Absolute path of a private file key, or null when the key escapes the private root. */
+export function privateFilePath(key) {
+  if (!key || typeof key !== "string") return null;
+  const full = path.resolve(privateUploadRoot, key);
+  return full.startsWith(privateUploadRoot + path.sep) ? full : null;
+}
+
+/** Delete a stored file by key (`isPrivate` = private root). Keys outside the root are ignored. */
+export async function deleteLocalFile(key, { isPrivate = false } = {}) {
   if (!key || typeof key !== "string") return;
-  const full = path.resolve(uploadRoot, key);
-  if (!full.startsWith(uploadRoot + path.sep)) return;
+  const root = isPrivate ? privateUploadRoot : uploadRoot;
+  const full = path.resolve(root, key);
+  if (!full.startsWith(root + path.sep)) return;
   try {
     await fs.unlink(full);
   } catch {
@@ -112,4 +144,6 @@ export const storage = {
   ensure: ensureUploadDir,
   sniff: sniffMime,
   root: uploadRoot,
+  privateRoot: privateUploadRoot,
+  privatePath: privateFilePath,
 };

@@ -14,6 +14,8 @@ import {
   signaturesMatch,
   razorpayConfigured,
   createRazorpayOrder,
+  fetchPayment,
+  capturePayment,
 } from "./razorpayApi.js";
 
 export { ONLINE_PAYMENT_METHODS, toPaise, razorpayConfigured };
@@ -94,7 +96,7 @@ export async function attachRazorpay(orders, { expectedId = "" } = {}) {
  * in full). Whatever part of the captured amount did not end up on an order paid by this
  * payment is refunded once, keyed `stray:${paymentId}`.
  */
-export async function markRazorpayPaid(razorpayOrderId, razorpayPaymentId, amountPaise = null) {
+export async function markRazorpayPaid(razorpayOrderId, razorpayPaymentId, amountPaise = null, { payment = null } = {}) {
   const record = await RazorpayOrder.findById(razorpayOrderId).lean();
   const current = await Order.find({ razorpayOrderId }).sort({ createdAt: 1 });
   const groupFilter = record?.orderIds?.length
@@ -196,8 +198,47 @@ export async function markRazorpayPaid(razorpayOrderId, razorpayPaymentId, amoun
         })
       );
     }
+    // Record how the buyer really paid (they can switch method inside Razorpay Checkout).
+    if (payment?.method) {
+      await Order.updateMany({ razorpayPaymentId, paidVia: { $in: ["", null] } }, { $set: { paidVia: String(payment.method).slice(0, 20) } });
+    }
+    // Seller ledger (p4-payouts): sale / fee / tax lines (+ held Route transfer) for every seller
+    // order this payment paid. Idempotent; failures are retried by the payouts job sweep.
+    try {
+      const { recordOnlinePayment } = await import("../payouts/ledger.js");
+      await recordOnlinePayment(razorpayPaymentId, payment);
+    } catch (err) {
+      console.error("payouts: recording payment failed", razorpayPaymentId, err.message);
+    }
   }
   return Order.find({ razorpayOrderId }).sort({ createdAt: 1 });
+}
+
+/**
+ * Read the payment from Razorpay and capture it if their account is on manual capture.
+ * The browser's handler is only a hint; amount and status come from this response.
+ */
+export async function readCapturedPayment(paymentId, { expectedOrderId } = {}) {
+  if (!razorpayConfigured()) {
+    throw new AppError(503, "Online payment is not configured", "PAYMENT_UNAVAILABLE");
+  }
+  let payment = await fetchPayment(paymentId);
+  if (!payment?.id || !payment.order_id) {
+    throw new AppError(502, "Razorpay did not return the payment", "PAYMENT_PROVIDER_ERROR");
+  }
+  if (expectedOrderId && payment.order_id !== expectedOrderId) {
+    throw new AppError(400, "This payment is for a different order", "PAYMENT_ORDER");
+  }
+  if (payment.currency && payment.currency !== "INR") {
+    throw new AppError(400, "Payment currency must be INR", "PAYMENT_CURRENCY");
+  }
+  if (payment.status === "authorized") {
+    payment = await capturePayment(payment.id, payment.amount);
+  }
+  if (payment.status !== "captured") {
+    throw new AppError(409, "Payment is not captured yet", "PAYMENT_PENDING");
+  }
+  return payment;
 }
 
 export async function verifyRazorpayPayment({ user, razorpayOrderId, razorpayPaymentId, razorpaySignature }) {
@@ -213,7 +254,8 @@ export async function verifyRazorpayPayment({ user, razorpayOrderId, razorpayPay
     $or: [{ razorpayOrderId }, { razorpayOrderHistory: razorpayOrderId }],
   });
   if (!owned.length) throw new AppError(404, "Order not found for this payment", "NOT_FOUND");
-  return markRazorpayPaid(razorpayOrderId, razorpayPaymentId);
+  const payment = await readCapturedPayment(razorpayPaymentId, { expectedOrderId: razorpayOrderId });
+  return markRazorpayPaid(payment.order_id, payment.id, Number(payment.amount), { payment });
 }
 
 /**
@@ -291,15 +333,65 @@ export async function processRazorpayEvent(event) {
   const payment = event?.payload?.payment?.entity;
   const rzpOrder = event?.payload?.order?.entity;
   const refund = event?.payload?.refund?.entity;
+  // Own-fleet COD by UPI QR (phase 5): qr_code.credited, or a captured payment without a Razorpay
+  // order that belongs to a delivery QR. False for anything else (order / billing / payout flows).
+  const qr = event?.payload?.qr_code?.entity;
+  if (name === "qr_code.credited" || (name === "payment.captured" && payment && !payment.order_id && (payment.notes?.delivery_task_id || payment.qr_code_id))) {
+    const { handleFleetQrEvent } = await import("../fleet/service.js");
+    if (await handleFleetQrEvent({ qrId: qr?.id || payment?.qr_code_id || "", payment, notes: payment?.notes || qr?.notes || {} })) {
+      return { ok: true, fleet: true };
+    }
+    if (name === "qr_code.credited") return { ok: true, ignored: true };
+  }
+  // Seller subscription billing (autopay subscription.* / invoice.paid, platform invoices paid via
+  // a Razorpay order or payment link). Returns false for anything that is not billing's.
+  if (
+    String(name || "").startsWith("subscription.") ||
+    name === "invoice.paid" ||
+    name === "payment_link.paid" ||
+    ((name === "payment.captured" || name === "order.paid") && (payment?.order_id || rzpOrder?.id))
+  ) {
+    const { handleBillingRazorpayEvent } = await import("../billing/razorpayBilling.js");
+    if (await handleBillingRazorpayEvent(event)) return { ok: true, billing: true };
+  }
+  // Seller payouts (p4-payouts): Route accounts / transfers / reversals / settlements, and buyer
+  // credit repayments paid through a platform Razorpay order. False for anything else.
+  if (
+    /^(transfer|reversal|account|product\.route|settlement)\./.test(String(name || "")) ||
+    ((name === "payment.captured" || name === "order.paid") && (payment?.order_id || rzpOrder?.id))
+  ) {
+    const { handlePayoutRazorpayEvent } = await import("../payouts/webhooks.js");
+    if (await handlePayoutRazorpayEvent(event)) return { ok: true, payouts: true };
+  }
   if ((name === "payment.captured" || name === "order.paid") && (payment?.order_id || rzpOrder?.id)) {
-    await markRazorpayPaid(payment?.order_id || rzpOrder.id, payment?.id || "", payment?.amount ?? rzpOrder?.amount_paid ?? null);
+    let orderId = payment?.order_id || rzpOrder.id;
+    let paymentId = payment?.id || "";
+    let amount = payment?.amount ?? rzpOrder?.amount_paid ?? null;
+    let entity = payment || null;
+    // When Razorpay returns the payment, their amount and status replace the event body.
+    if (paymentId && razorpayConfigured()) {
+      const live = await fetchPayment(paymentId);
+      if (live?.order_id) {
+        if (live.order_id !== orderId) {
+          throw new AppError(400, "Webhook payment does not match the Razorpay order", "PAYMENT_ORDER");
+        }
+        const settled = live.status === "authorized" ? await capturePayment(live.id, live.amount) : live;
+        if (settled.status !== "captured") return { ok: true, pending: true };
+        orderId = settled.order_id || live.order_id;
+        paymentId = settled.id || live.id;
+        amount = Number(settled.amount ?? live.amount);
+        entity = { ...(payment || {}), ...live, ...settled };
+      }
+    }
+    await markRazorpayPaid(orderId, paymentId, amount, { payment: entity });
   } else if (name === "payment.failed" && payment?.order_id) {
     const failing = await Order.find({ razorpayOrderId: payment.order_id, status: "pending", paymentStatus: "pending" }).select("_id").lean();
     if (failing.length) {
-      await Order.updateMany(
-        { _id: { $in: failing.map((o) => o._id) }, status: "pending", paymentStatus: "pending" },
-        { $set: { paymentStatus: "failed" } }
-      );
+      const ids = failing.map((o) => o._id);
+      await Order.updateMany({ _id: { $in: ids }, status: "pending", paymentStatus: "pending" }, { $set: { paymentStatus: "failed" } });
+      // Explicit buyer notice (durable listener in notifications/service.js; deduped per order).
+      const failed = await Order.find({ _id: { $in: ids }, status: "pending", paymentStatus: "failed" });
+      for (const o of failed) emitDomain("PAYMENT_FAILED", orderEventPayload(o, { razorpayPaymentId: payment.id || null, error: payment.error_description || null }));
       await emitOrderUpdated(failing);
     }
   } else if ((name === "refund.processed" || name === "refund.failed") && refund) {

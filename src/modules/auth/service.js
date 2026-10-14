@@ -18,6 +18,7 @@ import {
   LOCKOUT_MINUTES,
   LOCKOUT_THRESHOLD,
   SYSTEM_ROLES,
+  SELLER_APPLICANT_ROLE,
 } from "../../config/constants.js";
 import { emitDomain } from "../../utils/events.js";
 import { getIo } from "../../utils/io.js";
@@ -31,7 +32,7 @@ const REFRESH_GRACE_MS = 30 * 1000;
 const FAILED_WINDOW_MS = 60 * 60 * 1000;
 const VERIFY_TTL_MS = 24 * 60 * 60 * 1000;
 const RESET_TTL_MS = 60 * 60 * 1000;
-const OPEN_ORDER_STATUSES = ["pending", "confirmed", "processing", "ready_to_ship", "shipped", "out_for_delivery", "return_requested"];
+const OPEN_ORDER_STATUSES = ["pending", "confirmed", "processing", "ready_to_ship", "shipped", "out_for_delivery", "return_requested", "return_approved", "rto_in_transit"];
 
 // Used to keep login timing similar for unknown emails.
 let dummyHash;
@@ -54,6 +55,9 @@ function publicTenant(tenant) {
     name: tenant.name,
     slug: tenant.slug,
     status: tenant.status,
+    /** Why the store is paused / suspended etc. ("" when active) so the panel can show it directly. */
+    statusReason: tenant.statusReason || "",
+    statusChangedAt: tenant.statusChangedAt || null,
     branding: tenant.branding,
     businessProfile: tenant.businessProfile,
     taxSettings: tenant.taxSettings,
@@ -93,6 +97,10 @@ export function toPublicUser(user, role) {
     gstin: user.profile?.gstin || "",
     lastLoginAt: user.lastLoginAt,
     createdAt: user.createdAt,
+    /** Phase 5: store delivery rider (mobile + OTP login, rider mode in the mobile app). */
+    isRider: Boolean(r && typeof r === "object" && r.isSystem && r.slug === SYSTEM_ROLES.RIDER),
+    /** Phase 2: self-registered seller awaiting approval (see GET /seller-applications/me). */
+    isSellerApplicant: Boolean(r && typeof r === "object" && r.isSystem && r.slug === SELLER_APPLICANT_ROLE),
   };
 }
 
@@ -159,6 +167,15 @@ function tokenResponse(req, res, tokens) {
   return out;
 }
 
+/**
+ * Issue a new session and shape the token response exactly like POST /auth/login (refresh token
+ * in the httpOnly cookie; also in JSON for X-Client: mobile). Used by OTP login (phase 5).
+ */
+export async function issueLoginResponse(user, role, req, res) {
+  const tokens = await issueTokens(user, role, req);
+  return tokenResponse(req, res, tokens);
+}
+
 export async function revokeAllSessions(userId, reason = "revoked") {
   await RefreshSession.updateMany(
     { userId, revokedAt: null },
@@ -186,7 +203,8 @@ function disconnectUserSockets(userId) {
 // Registration & email verification
 // ---------------------------------------------------------------------------------------------
 
-async function issueEmailVerification(userId, email) {
+/** Also used by seller applicant registration (modules/sellerApplications). */
+export async function issueEmailVerification(userId, email) {
   const token = randomToken();
   await User.updateOne(
     { _id: userId },

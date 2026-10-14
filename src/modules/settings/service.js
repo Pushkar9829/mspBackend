@@ -1,6 +1,6 @@
 import { Settings } from "./settings.model.js";
 import { AppError } from "../../utils/AppError.js";
-import { settingDefinition, knownKeys, describeSetting } from "./registry.js";
+import { settingDefinition, knownKeys, describeSetting, PLATFORM_ONLY_COMMERCE_KEYS } from "./registry.js";
 
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -18,6 +18,8 @@ export async function listSettings(req) {
     filter.tenantId = req.tenantId;
   }
   if (req.query.q) filter.key = new RegExp(escapeRegex(String(req.query.q).trim().slice(0, 100)), "i");
+  // Legacy store overrides of platform-only keys are ignored (and cleaned by a migration).
+  if (filter.scope === "tenant") filter.$and = [{ key: { $nin: PLATFORM_ONLY_COMMERCE_KEYS } }];
   return Settings.find(filter).sort({ key: 1 }).limit(500);
 }
 
@@ -149,4 +151,21 @@ export async function mapsProvider(fallback = "stub") {
   } catch {
     return fallback;
   }
+}
+
+/**
+ * Idempotent startup migration: platform fee / delivery-partner settings are platform-only, so
+ * remove any store-level overrides written before that rule (reads already ignore them).
+ * Returns { removed }.
+ */
+export async function cleanPlatformOnlyOverrides() {
+  const res = await Settings.deleteMany({ scope: "tenant", key: { $in: PLATFORM_ONLY_COMMERCE_KEYS } });
+  const removed = res.deletedCount || 0;
+  if (removed) invalidateSettingCache();
+  return { removed };
+}
+
+/** Settings startup migrations (safe to run on every boot / several instances). */
+export async function runSettingsMigrations() {
+  return { platformOnlyOverrides: await cleanPlatformOnlyOverrides() };
 }

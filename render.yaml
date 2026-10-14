@@ -86,6 +86,14 @@ services:
         sync: false
       - key: DELHIVERY_WEBHOOK_SECRET
         sync: false
+      - key: SHIPROCKET_EMAIL
+        sync: false
+      - key: SHIPROCKET_PASSWORD
+        sync: false
+      - key: SHIPROCKET_BASE_URL
+        sync: false
+      - key: SHIPROCKET_WEBHOOK_TOKEN
+        sync: false
       - key: ALLOW_NO_TRANSACTIONS
         sync: false
       - key: DISABLE_IN_PROCESS_JOBS
@@ -117,6 +125,8 @@ services:
       - key: NOTIFICATION_TTL_DAYS
         sync: false
       - key: NOTIFICATION_UNSUBSCRIBE_SECRET
+        sync: false
+      - key: KYC_ENCRYPTION_KEY
         sync: false
       - key: ANALYTICS_RETENTION_DAYS
         sync: false

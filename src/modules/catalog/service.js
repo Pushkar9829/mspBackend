@@ -9,6 +9,8 @@ import { Inventory } from "../inventory/inventory.model.js";
 import { Warehouse } from "../inventory/warehouse.model.js";
 import * as inventoryService from "../inventory/service.js";
 import { Tenant } from "../tenants/tenant.model.js";
+import { SELLING_TENANT_STATUSES } from "../../config/constants.js";
+import { FSSAI_HOLD, fssaiForProduct, isFoodCategory, tenantUnderFssaiHold } from "./compliance.js";
 import { AppError } from "../../utils/AppError.js";
 import { slugify } from "../../utils/slug.js";
 import { paginate, paginated } from "../../utils/pagination.js";
@@ -18,7 +20,8 @@ import { checkServiceability, etaWindow, serviceableTenantIds } from "../locatio
 import { getCommerceSettings, deliveryInfo, pickPartner } from "../settings/commerce.js";
 import { getCachedSetting } from "../settings/service.js";
 import { emitDomain } from "../../utils/events.js";
-import { bulkItemSchema } from "./validators.js";
+import { assertWithinLimit } from "../billing/entitlements.js";
+import { bulkItemSchema, SKU_PATTERN, SKU_MESSAGE } from "./validators.js";
 import { parseCsv, toCsv } from "./csv.js";
 import { alternateSearch, FEW_RESULTS } from "../search/fuzzy.js";
 import {
@@ -36,7 +39,8 @@ const MAX_Q = 80;
 /** Unpaginated list endpoints (legacy array responses) are capped at this many rows. */
 const LEGACY_LIST_CAP = 500;
 const IN_MEMORY_CAP = 1000;
-export const STOREFRONT_TENANT_STATUSES = ["active", "trial"];
+/** Stores visible to buyers / able to sell (paused, pending, suspended, archived are hidden). */
+export const STOREFRONT_TENANT_STATUSES = SELLING_TENANT_STATUSES;
 
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
@@ -300,6 +304,7 @@ async function assertBrandUsable(brandId, tenantId) {
 
 export async function createCategory(req, body) {
   const tenantId = staffTenantId(req);
+  if (!req.isPlatformAdmin) delete body.requiresFssai; // food flag is platform-managed
   const parent = body.parentId ? await Category.findById(body.parentId).lean() : null;
   if (body.parentId && !parent) throw new AppError(400, "Parent category not found", "VALIDATION_ERROR");
   if (parent?.tenantId && String(parent.tenantId) !== String(tenantId)) {
@@ -312,6 +317,7 @@ export async function createCategory(req, body) {
 export async function updateCategory(req, id, body) {
   const cat = await editableCategory(req, id);
   const changes = { ...body };
+  if (!req.isPlatformAdmin) delete changes.requiresFssai; // food flag is platform-managed
   if (changes.parentId) {
     if (String(changes.parentId) === String(cat._id)) {
       throw new AppError(400, "A category cannot be its own parent", "VALIDATION_ERROR");
@@ -499,7 +505,9 @@ export async function getProduct(req, id, { buyer = false } = {}) {
     productId: product._id,
     status: buyer ? "active" : { $ne: "archived" },
   }).sort({ createdAt: 1 });
-  return { ...product.toObject(), variants };
+  if (!buyer) return { ...product.toObject(), variants };
+  const seller = await Tenant.findById(product.tenantId).select("kyc.fssai").lean();
+  return { ...product.toObject(), variants, fssai: await fssaiForProduct(product, seller) };
 }
 
 async function createProductDoc(doc) {
@@ -559,8 +567,10 @@ async function assertWarehouse(warehouseId, tenantId) {
   if (!ok) throw new AppError(400, "Warehouse not found", "VALIDATION_ERROR");
 }
 
-export async function createProduct(req, body) {
+export async function createProduct(req, body, { limitChecked = false } = {}) {
   if (!req.tenantId) throw new AppError(400, "Tenant context required", "TENANT_REQUIRED");
+  // Plan limit (products = non-archived products). Bulk import checks the whole batch up front.
+  if (!limitChecked) await assertWithinLimit(req.tenantId, "products", { req });
   const { variant, initialStock, sellingPrice, listPrice, packSize, availableQty, tierPrices, status, ...rest } = body;
   const wantsPublish = status === "published";
   if (wantsPublish) assertCanPublish(req);
@@ -572,6 +582,11 @@ export async function createProduct(req, body) {
   await assertCategoryUsable(rest.categoryId, req.tenantId);
   await assertBrandUsable(rest.brandId, req.tenantId);
   if (initialStock?.warehouseId) await assertWarehouse(initialStock.warehouseId, req.tenantId);
+  // Expired FSSAI licence: new food products start hidden (released on renewal).
+  if (rest.categoryId && (await isFoodCategory(rest.categoryId)) && (await tenantUnderFssaiHold(req.tenantId))) {
+    rest.enabled = false;
+    rest.complianceHold = FSSAI_HOLD;
+  }
 
   const product = await createProductDoc({
     ...rest,
@@ -647,6 +662,13 @@ async function setProductAvailable(req, product, qty, warehouseId = null) {
   return setVariantAvailable(req, product.tenantId, primary._id, qty, warehouseId);
 }
 
+/** SKU format applies to new / changed SKUs only — an existing legacy SKU can still be re-saved unchanged. */
+function assertSkuFormatIfChanged(nextSku, currentSku) {
+  if (!nextSku || SKU_PATTERN.test(nextSku)) return;
+  if (currentSku != null && String(currentSku).toUpperCase() === String(nextSku).toUpperCase()) return;
+  throw new AppError(400, SKU_MESSAGE, "VALIDATION_ERROR", { fields: { sku: SKU_MESSAGE } });
+}
+
 export async function updateProduct(req, id, body) {
   const { sellingPrice, listPrice, availableQty, tierPrices, packSize, status, warehouseId, ...rest } = body;
   const wantsPublish = status === "published";
@@ -654,8 +676,26 @@ export async function updateProduct(req, id, body) {
   if (status && !wantsPublish) rest.status = status;
   if (rest.sku) rest.sku = String(rest.sku).trim().toUpperCase();
 
-  const current = await Product.findOne({ _id: id, ...tenantFilter(req) }).select("tenantId status scheduledAt").lean();
+  const current = await Product.findOne({ _id: id, ...tenantFilter(req) }).select("tenantId status scheduledAt complianceHold categoryId sku").lean();
   if (!current) throw new AppError(404, "Product not found", "NOT_FOUND");
+  assertSkuFormatIfChanged(rest.sku, current.sku);
+  delete rest.complianceHold;
+  if (current.complianceHold && rest.enabled === true) {
+    throw new AppError(409, "This product is hidden until the store's FSSAI licence is renewed", "FSSAI_EXPIRED");
+  }
+  if (!current.complianceHold && rest.categoryId && String(rest.categoryId) !== String(current.categoryId || "")) {
+    if ((await isFoodCategory(rest.categoryId)) && (await tenantUnderFssaiHold(current.tenantId))) {
+      rest.enabled = false;
+      rest.complianceHold = FSSAI_HOLD;
+    }
+  }
+  // Plan limit: restoring an archived product adds one; scheduling a not-yet-live product is a
+  // publish path (blocked only while the store is over its products limit after a downgrade).
+  if (current.status === "archived" && rest.status && rest.status !== "archived") {
+    await assertWithinLimit(current.tenantId, "products", { req });
+  } else if (status === "scheduled" && current.status !== "published" && current.status !== "scheduled") {
+    await assertWithinLimit(current.tenantId, "products", { adding: 0, req });
+  }
   const staysScheduled = status === "scheduled" || (!status && current.status === "scheduled" && rest.scheduledAt !== undefined);
   if (staysScheduled) {
     if (rest.scheduledAt === null) {
@@ -713,13 +753,86 @@ function bulkWholesale(row, existing) {
   };
 }
 
+const BULK_FIELD_LABELS = {
+  sku: "SKU",
+  name: "Name",
+  sellingPrice: "Selling price",
+  listPrice: "MRP / list price",
+  description: "Description",
+  tags: "Tags",
+  hsn: "HSN",
+  packSize: "Pack size",
+  categoryId: "Category ID",
+  brandId: "Brand ID",
+  status: "Status",
+  publish: "Publish",
+  availableQty: "Available qty",
+  warehouseId: "Warehouse ID",
+  scheduledAt: "Scheduled at",
+  specifications: "Specifications",
+  "wholesale.bulkEligible": "Bulk eligible",
+  "wholesale.moq": "MOQ",
+  "wholesale.maxQty": "Max qty",
+  "wholesale.packMultiple": "Pack multiple",
+  "wholesale.caseQty": "Case qty",
+  "wholesale.leadTimeDays": "Lead time (days)",
+};
+
+function bulkFieldLabel(path) {
+  const key = path.join(".");
+  if (BULK_FIELD_LABELS[key]) return BULK_FIELD_LABELS[key];
+  if (path[0] === "tierPrices" && Number.isInteger(path[1])) {
+    const part = { minQty: "min qty", maxQty: "max qty", unitPrice: "price" }[path[2]] || "";
+    return `Price slab ${path[1] + 1}${part ? ` ${part}` : ""}`;
+  }
+  return key || "Row";
+}
+
+/** Seller-friendly text for one zod issue of a CSV/bulk row (no raw zod wording). */
+function friendlyIssue(issue) {
+  const label = bulkFieldLabel(issue.path);
+  const msg = String(issue.message || "");
+  switch (issue.code) {
+    case "custom":
+      return msg;
+    case "invalid_type":
+      if (/received undefined/.test(msg)) return `${label} is required`;
+      if (issue.expected === "number") return `${label} must be a number`;
+      if (issue.expected === "boolean") return `${label} must be true or false`;
+      if (issue.expected === "date") return `${label} must be a valid date`;
+      return `${label} has an invalid value`;
+    case "too_small":
+      if (issue.origin === "string") return Number(issue.minimum) <= 1 ? `${label} is required` : `${label} must be at least ${issue.minimum} characters`;
+      if (issue.origin === "array") return `${label} needs at least ${issue.minimum} item(s)`;
+      return `${label} must be at least ${issue.minimum}`;
+    case "too_big":
+      if (issue.origin === "string") return `${label} must be at most ${issue.maximum} characters`;
+      if (issue.origin === "array") return `${label} allows at most ${issue.maximum} item(s)`;
+      return `${label} must be at most ${issue.maximum}`;
+    case "invalid_value":
+      return Array.isArray(issue.values) && issue.values.length ? `${label} must be one of: ${issue.values.join(", ")}` : `${label} has an invalid value`;
+    case "invalid_format":
+      return issue.path[0] === "sku" ? msg : /Invalid id/.test(msg) ? `${label} is not a valid ID` : `${label} has an invalid format`;
+    case "unrecognized_keys":
+      return `Unknown column(s): ${(issue.keys || []).join(", ")}`;
+    default:
+      return /Invalid id/.test(msg) ? `${label} is not a valid ID` : `${label} has an invalid value`;
+  }
+}
+
 function rowIssues(error) {
   const fields = {};
   for (const issue of error.issues) {
     const key = issue.path.join(".") || "row";
-    if (!(key in fields)) fields[key] = issue.message;
+    if (!(key in fields)) fields[key] = friendlyIssue(issue);
   }
   return fields;
+}
+
+/** "Row 3: SKU is required" — row numbers count the CSV header as row 1 (item index 0 = row 2). */
+function rowMessage(index, fields) {
+  const first = Object.values(fields || {})[0];
+  return first ? `Row ${index + 2}: ${first}` : `Row ${index + 2}`;
 }
 
 /**
@@ -745,7 +858,8 @@ async function dryRunBulk(req, items, { availableQtyMode }) {
   const rows = parsedRows.map((parsed, index) => {
     const raw = items[index];
     if (!parsed.success) {
-      return { index, sku: raw?.sku ?? null, action: null, ok: false, errors: rowIssues(parsed.error) };
+      const errors = rowIssues(parsed.error);
+      return { index, sku: raw?.sku ?? null, action: null, ok: false, errors, message: rowMessage(index, errors) };
     }
     const row = parsed.data;
     const sku = row.sku.toUpperCase();
@@ -768,6 +882,7 @@ async function dryRunBulk(req, items, { availableQtyMode }) {
       action: current ? "update" : "create",
       ok,
       errors,
+      ...(ok ? {} : { message: rowMessage(index, errors) }),
       stock: row.availableQty != null && availableQtyMode !== "skip" ? { mode: "set", qty: row.availableQty } : null,
     };
   });
@@ -788,10 +903,55 @@ async function dryRunBulk(req, items, { availableQtyMode }) {
  *    variant through inventory.setAvailableQty (in `warehouseId`, or the default warehouse);
  *  - "skip": the stock column is ignored.
  */
+/**
+ * How many products a bulk file would ADD to the store's plan usage: valid rows with a new SKU
+ * (duplicates in the file counted once) plus rows that restore an archived product.
+ */
+async function bulkProductsAdding(req, items) {
+  const rows = items.map((raw) => bulkItemSchema.safeParse(raw)).filter((r) => r.success).map((r) => r.data);
+  const skus = [...new Set(rows.map((r) => r.sku.toUpperCase()))];
+  if (!skus.length) return 0;
+  const existing = await Product.find({ tenantId: req.tenantId, sku: { $in: skus } }).select("sku status").lean();
+  const bySku = new Map(existing.map((p) => [p.sku, p]));
+  let adding = 0;
+  const seen = new Set();
+  for (const row of rows) {
+    const sku = row.sku.toUpperCase();
+    if (seen.has(sku)) continue;
+    seen.add(sku);
+    const current = bySku.get(sku);
+    if (!current) adding += 1;
+    else if (current.status === "archived" && row.status && row.status !== "published") adding += 1;
+  }
+  return adding;
+}
+
+/** Plan check for a whole bulk file: { ok, adding, error? } (error = LIMIT_REACHED details). */
+async function bulkLimitCheck(req, items) {
+  const adding = await bulkProductsAdding(req, items);
+  try {
+    await assertWithinLimit(req.tenantId, "products", { adding, req });
+    return { ok: true, adding };
+  } catch (err) {
+    if (err?.code !== "LIMIT_REACHED" && err?.code !== "PLAN_FEATURE_REQUIRED") throw err;
+    return { ok: false, adding, error: err };
+  }
+}
+
 export async function bulkUploadProducts(req, items = [], { dryRun = false, availableQtyMode = "set" } = {}) {
   if (!req.tenantId) throw new AppError(400, "Tenant context required", "TENANT_REQUIRED");
   const mode = availableQtyMode === "skip" ? "skip" : "set";
-  if (dryRun) return dryRunBulk(req, items, { availableQtyMode: mode });
+  // Plan limit: the whole batch is rejected (nothing is written) when its new products don't fit.
+  const limitCheck = await bulkLimitCheck(req, items);
+  if (dryRun) {
+    const result = await dryRunBulk(req, items, { availableQtyMode: mode });
+    result.planLimit = limitCheck.ok
+      ? { ok: true, adding: limitCheck.adding }
+      : { ok: false, code: limitCheck.error.code, message: limitCheck.error.message, ...(limitCheck.error.extra || {}) };
+    if (!limitCheck.ok) result.ok = false;
+    return result;
+  }
+  if (!limitCheck.ok) throw limitCheck.error;
   const created = [];
   const updated = [];
   const errors = [];
@@ -800,13 +960,13 @@ export async function bulkUploadProducts(req, items = [], { dryRun = false, avai
   for (const [index, raw] of items.entries()) {
     const parsed = bulkItemSchema.safeParse(raw);
     if (!parsed.success) {
-      const issue = parsed.error.issues[0];
+      const fields = rowIssues(parsed.error);
       errors.push({
         index,
         sku: raw?.sku,
-        message: `${issue.path.join(".") || "row"}: ${issue.message}`,
+        message: rowMessage(index, fields),
         code: "VALIDATION_ERROR",
-        fields: rowIssues(parsed.error),
+        fields,
       });
       continue;
     }
@@ -861,7 +1021,7 @@ export async function bulkUploadProducts(req, items = [], { dryRun = false, avai
       errors.push({
         index,
         sku: row.sku,
-        message: err.code === 11000 ? "Duplicate SKU" : err.status && err.status < 500 ? err.message : "Failed",
+        message: `Row ${index + 2}: ${err.code === 11000 ? "Duplicate SKU" : err.status && err.status < 500 ? err.message : "Failed"}`,
         code: err.code === 11000 ? "DUPLICATE" : err.code || "ERROR",
         ...(err.extra?.fields ? { fields: err.extra.fields } : {}),
       });
@@ -875,8 +1035,10 @@ export async function bulkUploadProducts(req, items = [], { dryRun = false, avai
 /**
  * Scheduled publishing (called by the scheduled-publish job). Each due product is claimed
  * atomically; the scheduler re-checks that the user who scheduled it is still active and still
- * holds products.publish for that store (and that the store is active). Otherwise the product
- * goes back to draft with `scheduleError` set.
+ * holds products.publish for that store. Otherwise the product goes back to draft with
+ * `scheduleError` set. A store that is not active (paused / pending / suspended / archived)
+ * DEFERS the publish: the product stays `scheduled` (scheduleError explains why) and the claim is
+ * kept, so it is retried after the claim expires (~10 min) until the store is active again.
  */
 export async function publishScheduledProducts({ batch = 200, now = new Date() } = {}) {
   const [{ User }, { Role }, { effectivePermissions, isPlatformRole }] = await Promise.all([
@@ -886,6 +1048,7 @@ export async function publishScheduledProducts({ batch = 200, now = new Date() }
   ]);
   let published = 0;
   let rejected = 0;
+  let deferred = 0;
   for (let i = 0; i < batch; i += 1) {
     const claimAt = new Date();
     const product = await Product.findOneAndUpdate(
@@ -898,6 +1061,15 @@ export async function publishScheduledProducts({ batch = 200, now = new Date() }
       { new: true, sort: { scheduledAt: 1 } }
     ).lean();
     if (!product) break;
+    const storeRow = await Tenant.findById(product.tenantId).select("status").lean();
+    if (storeRow && !STOREFRONT_TENANT_STATUSES.includes(storeRow.status)) {
+      await Product.collection.updateOne(
+        { _id: product._id, status: "scheduled", scheduleClaimedAt: claimAt },
+        { $set: { scheduleError: `Deferred: the store is ${storeRow.status}. It will publish once the store is active.` } }
+      );
+      deferred += 1;
+      continue;
+    }
     let reason = "";
     if (!product.scheduledBy) reason = "No scheduler recorded";
     else {
@@ -911,7 +1083,15 @@ export async function publishScheduledProducts({ batch = 200, now = new Date() }
       else if (!sameStore) reason = "The user who scheduled this product no longer belongs to the store";
       else if (!(platform || perms.includes("*") || perms.includes("products.publish"))) {
         reason = "The user who scheduled this product no longer holds products.publish";
-      } else if (!tenant || !STOREFRONT_TENANT_STATUSES.includes(tenant.status)) reason = "The store is not active";
+      } else if (!tenant) reason = "The store no longer exists";
+      else if (!platform) {
+        try {
+          await assertWithinLimit(product.tenantId, "products", { adding: 0 });
+        } catch (err) {
+          if (err?.code !== "LIMIT_REACHED") throw err;
+          reason = `Plan limit reached: ${err.message}`;
+        }
+      }
     }
     if (reason) {
       await Product.collection.updateOne(
@@ -928,7 +1108,7 @@ export async function publishScheduledProducts({ batch = 200, now = new Date() }
     published += 1;
     emitDomain("PRODUCT_PUBLISHED", { tenantId: product.tenantId, productId: product._id, resource: "product", resourceId: product._id, scheduled: true });
   }
-  return { published, rejected };
+  return { published, rejected, deferred };
 }
 
 /* ------------------------------------------------------------------ CSV import / export */
@@ -1146,6 +1326,8 @@ export async function createVariant(req, body) {
   const product = await Product.findOne({ _id: body.productId, ...tenantFilter(req) });
   if (!product) throw new AppError(404, "Product not found", "NOT_FOUND");
   if (product.status === "archived") throw new AppError(409, "Product is archived", "ARCHIVED");
+  // A store over its products limit (after a downgrade) can't grow its catalog with new variants.
+  await assertWithinLimit(product.tenantId, "products", { adding: 0, req });
   const sku = String(body.sku).trim().toUpperCase();
   const clash = await ProductVariant.findOne({ tenantId: product.tenantId, sku }).select("status").lean();
   if (clash) {
@@ -1170,6 +1352,10 @@ export async function createVariant(req, body) {
 export async function updateVariant(req, id, body) {
   const changes = { ...body };
   if (changes.sku) changes.sku = String(changes.sku).trim().toUpperCase();
+  if (changes.sku && !SKU_PATTERN.test(changes.sku)) {
+    const before = await ProductVariant.findOne({ _id: id, ...tenantFilter(req) }).select("sku").lean();
+    assertSkuFormatIfChanged(changes.sku, before?.sku ?? null);
+  }
   if (changes.listPrice != null) changes.listPrice = round2(changes.listPrice);
   if (changes.sellingPrice != null) changes.sellingPrice = round2(changes.sellingPrice);
   const update = { $set: {} };
@@ -1231,6 +1417,12 @@ export async function deleteVariant(req, id) {
 }
 
 export async function publishProduct(req, id) {
+  // Publishing a product that is not live yet is blocked while the store is over its plan's
+  // products limit (downgrade). Already-published products are never touched.
+  const current = await Product.findOne({ _id: id, ...tenantFilter(req), status: { $ne: "archived" } }).select("tenantId status").lean();
+  if (current && current.status !== "published") {
+    await assertWithinLimit(current.tenantId, "products", { adding: 0, req });
+  }
   const product = await Product.findOneAndUpdate(
     { _id: id, ...tenantFilter(req), status: { $ne: "archived" } },
     { $set: { status: "published" } },
@@ -1346,7 +1538,7 @@ export async function lookupBySlug(slug, pack, req) {
     loadActiveOffers([product.tenantId]),
     loadBuyerPriceLists([product.tenantId], req?.user?._id),
     variantStockMap(variants.map((v) => v._id)),
-    Tenant.findById(product.tenantId).select("name slug branding pickupAddress").lean(),
+    Tenant.findById(product.tenantId).select("name slug branding pickupAddress kyc.fssai").lean(),
     storeRating(product.tenantId),
     getCommerceSettings(product.tenantId),
   ]);
@@ -1376,10 +1568,13 @@ export async function lookupBySlug(slug, pack, req) {
     : "";
   const delivery = await deliveryInfo(commerce, product.tenantId);
   const rules = wholesaleRules(product);
+  const fssai = await fssaiForProduct(product, seller);
   return {
     slug: product.slug,
+    fssai,
     product: {
       ...product.toObject(),
+      fssai,
       offers: liveOffers,
       ...summary,
       orderLimit: product.wholesale?.maxQty ?? null,
@@ -1406,6 +1601,7 @@ export async function lookupBySlug(slug, pack, req) {
           logo: seller.branding?.logo || seller.branding?.logoUrl || "",
           rating: rating.rating,
           ratingCount: rating.ratingCount,
+          fssai,
         }
       : null,
     returns: {

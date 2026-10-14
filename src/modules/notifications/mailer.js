@@ -57,6 +57,8 @@ export function withSupportFooter({ text, html, replyTo }, support) {
 
 export async function sendMail({ to, subject, text, html, headers, replyTo }) {
   if (!to) return { sent: false, skipped: "no-recipient" };
+  // Synthetic, non-deliverable addresses (riders "rider+<id>@riders.invalid", deleted accounts) are never emailed.
+  if (/\.invalid$/i.test(String(to).trim())) return { sent: false, skipped: "non-deliverable" };
   ({ text, html, replyTo } = withSupportFooter({ text, html, replyTo }, await platformSupportEmail()));
   if (!mailConfigured()) {
     if (!env.isProd) console.log(`Email to ${to}: ${subject}\n${text || ""}`);

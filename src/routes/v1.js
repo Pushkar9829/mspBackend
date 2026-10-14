@@ -27,9 +27,26 @@ import searchRoutes from "../modules/search/routes.js";
 import ledgerRoutes from "../modules/ledger/routes.js";
 import wishlistRoutes from "../modules/wishlist/routes.js";
 import shippingRoutes from "../modules/shipping/routes.js";
+import sellerApplicationRoutes from "../modules/sellerApplications/routes.js";
+import termsRoutes from "../modules/terms/routes.js";
+import billingRoutes, { publicPlansRouter, adminPlansRouter, adminSubscriptionsRouter } from "../modules/billing/routes.js";
+import {
+  adminTaxRouter,
+  adminReconciliationRouter,
+  adminCodRemittanceRouter,
+  adminStatementRouter,
+  sellerTaxRouter,
+} from "../modules/payouts/taxRoutes.js";
+import { sellerPayoutRouter, adminPayoutRouter } from "../modules/payouts/routes.js";
+import { otpAuthRouter, ridersRouter, fleetRouter, riderAppRouter } from "../modules/fleet/routes.js";
+import { disputeRouter, adminDisputeRouter } from "../modules/disputes/routes.js";
+import devicesRoutes from "../modules/notifications/devices.routes.js";
+import { sellerScorecardRouter, adminScorecardRouter } from "../modules/scorecard/routes.js";
 
 const v1 = Router();
 
+// Phase 5: rider mobile + OTP login (/auth/otp/request, /auth/otp/verify).
+v1.use("/auth", otpAuthRouter);
 v1.use("/auth", authRoutes);
 v1.use("/tenants", tenantRoutes);
 v1.use("/users", userRoutes);
@@ -63,5 +80,32 @@ v1.use("/search", searchRoutes);
 v1.use("/ledger", ledgerRoutes);
 v1.use("/wishlist", wishlistRoutes);
 v1.use("/shipping", shippingRoutes);
+v1.use("/seller-applications", sellerApplicationRoutes);
+v1.use("/terms", termsRoutes);
+v1.use("/plans", publicPlansRouter);
+v1.use("/admin/plans", adminPlansRouter);
+v1.use("/admin/subscriptions", adminSubscriptionsRouter);
+v1.use("/billing", billingRoutes);
+// Phase 4 (p4-tax): tax reports, reconciliation, COD remittances, seller statements. The
+// statement routers share the /payouts and /admin/payouts prefixes with p4-payouts' routers
+// (non-overlapping paths; unmatched requests fall through).
+v1.use("/admin/tax", adminTaxRouter);
+v1.use("/admin/reconciliation", adminReconciliationRouter);
+v1.use("/admin/cod-remittances", adminCodRemittanceRouter);
+v1.use("/admin/payouts", adminStatementRouter);
+v1.use("/payouts", sellerTaxRouter);
+// Phase 4 (p4-payouts): seller balance / ledger / payouts and admin payout management.
+v1.use("/admin/payouts", adminPayoutRouter);
+v1.use("/payouts", sellerPayoutRouter);
+// Phase 5 (p5-backend): own delivery fleet — riders (seller), delivery board (seller), rider app.
+v1.use("/riders", ridersRouter);
+v1.use("/fleet", fleetRouter);
+v1.use("/rider", riderAppRouter);
+// Phase 6 (p6-backend): disputes, mobile push devices, seller scorecard.
+v1.use("/disputes", disputeRouter);
+v1.use("/admin/disputes", adminDisputeRouter);
+v1.use("/devices", devicesRoutes);
+v1.use("/scorecard", sellerScorecardRouter);
+v1.use("/admin/scorecards", adminScorecardRouter);
 
 export default v1;

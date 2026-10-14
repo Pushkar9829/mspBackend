@@ -1,10 +1,17 @@
-export const TENANT_STATUSES = [
-  "active",
-  "suspended",
-  "trial",
-  "pending",
-  "archived",
-];
+/**
+ * Operational store states (separate from the seller application / KYC state):
+ * - pending: not approved yet. Staff limited to onboarding endpoints (403 STORE_PENDING), store hidden.
+ * - active: live.
+ * - paused: hidden from buyers, cart/checkout blocked; staff may still work orders, returns, chat,
+ *   notifications, read the store profile/settings (everything else 403 STORE_PAUSED).
+ * - suspended: full staff lockout (403 TENANT_SUSPENDED).
+ * - archived: closed (full lockout).
+ * `trial` was retired in phase 2 (runTenantMigrations: trial -> active).
+ */
+export const TENANT_STATUSES = ["pending", "active", "paused", "suspended", "archived"];
+
+/** Tenant statuses whose store is visible to buyers and can sell. */
+export const SELLING_TENANT_STATUSES = ["active"];
 
 // "locked" is legacy (old lockout flipped status); lockout is now a temporary `lockedUntil` only.
 // "deleted" = self-deleted / anonymised account.
@@ -34,7 +41,23 @@ export const ORDER_STATUSES = [
   "return_approved",
   "returned",
   "refunded",
+  /** RTO: the carrier is bringing the undelivered parcel back (no stock / money change yet). */
+  "rto_in_transit",
+  /** RTO: the parcel physically reached the seller; restock + refund + credit note happen here. */
+  "returned_to_origin",
 ];
+
+/** Who cancelled an order, and whose fault it was (recorded on every cancel). */
+export const ORDER_CANCELLED_BY = ["buyer", "seller", "admin", "system"];
+export const ORDER_CANCEL_CAUSES = ["buyer", "seller", "system", "payment_timeout"];
+
+/** Lifecycle of one return request (order.returns[]). */
+/**
+ * Phase 6: `qc_rejected` = the seller inspected the returned goods and rejected ALL of them (no
+ * refund); `pickup_failed` = the courier / rider could not pick the return up (closed). A return
+ * with only SOME units rejected is `received` with `qc.items` listing the rejected units.
+ */
+export const RETURN_STATUSES = ["requested", "approved", "rejected", "received", "qc_rejected", "pickup_failed"];
 
 export const PAYMENT_METHODS = ["upi", "card", "netbanking", "cod", "purchase_order", "credit_terms"];
 
@@ -91,6 +114,8 @@ export const SYSTEM_ROLES = {
   TENANT_ADMIN: "tenant_admin",
   SUPPORT_AGENT: "support_agent",
   BUYER: "buyer",
+  /** Phase 5: delivery rider of a store's own fleet (tenant-scoped, NOT staff). */
+  RIDER: "rider",
 };
 
 export const PERMISSIONS = [
@@ -164,6 +189,19 @@ export const PERMISSIONS = [
   "reviews.moderate",
   "media.upload",
   "returns.manage",
+  /** Phase 2 onboarding: review seller applications (platform only). */
+  "sellers.review",
+  /** Phase 3 billing: seller subscription plans, subscriptions and platform invoices (platform only). */
+  "billing.manage",
+  /** Phase 4 payouts: seller payout balance / ledger / statements (store) and payouts, tax reports, reconciliation (platform). */
+  "payouts.view",
+  "payouts.manage",
+  /** Phase 5 fleet: manage the store's own delivery riders, delivery board and rider cash. */
+  "riders.manage",
+  /** Phase 5 fleet: the rider app (system rider role only; never grantable to other roles). */
+  "rider.app",
+  /** Phase 6: decide buyer disputes about returns (platform only). */
+  "disputes.manage",
 ];
 
 /**
@@ -195,6 +233,12 @@ export const PERMISSION_GROUPS = {
   analytics: "Reports & analytics",
   settings: "Settings",
   audit: "Settings",
+  sellers: "Stores (platform)",
+  billing: "Stores (platform)",
+  payouts: "Finance",
+  riders: "Delivery",
+  rider: "Delivery",
+  disputes: "Stores (platform)",
 };
 
 export const PERMISSION_META = {
@@ -235,7 +279,7 @@ export const PERMISSION_META = {
   "pricing.view": ["View pricing", "See price lists, tiers and margins."],
   "pricing.create": ["Create price lists", "Create price lists and tier prices."],
   "pricing.edit": ["Edit pricing", "Change prices, tiers and price lists."],
-  "pricing.approve": ["Approve pricing", "Approve price lists and offers before they go live."],
+  "pricing.approve": ["Approve pricing", "Approve price lists before they go live. Offers are approved by the marketplace team."],
   "offers.create": ["Create offers", "Create discounts and promotional offers."],
   "offers.edit": ["Edit offers", "Change or end running offers."],
   "coupons.create": ["Create coupons", "Create coupon codes."],
@@ -268,6 +312,13 @@ export const PERMISSION_META = {
   "ledger.manage": ["Manage customer ledger", "Record payments, adjustments and credit terms."],
   "reviews.moderate": ["Moderate reviews", "Hide, restore or delete product reviews."],
   "media.upload": ["Upload media", "Upload and delete images and documents."],
+  "sellers.review": ["Review seller applications", "Review, approve or reject seller sign-up applications and see their KYC."],
+  "billing.manage": ["Manage seller billing", "Manage subscription plans, store subscriptions, platform invoices, discounts and payments."],
+  "payouts.view": ["View payouts", "See the store's payout balance, seller ledger, payouts, statements and tax (TCS / TDS) summary."],
+  "riders.manage": ["Manage riders & delivery", "Add and manage the store's own delivery riders, assign deliveries and confirm rider cash deposits."],
+  "rider.app": ["Rider app", "Delivery rider app (system rider role only)."],
+  "disputes.manage": ["Manage disputes", "Review buyer disputes about rejected returns, failed pickups and quality-check rejections; force refunds, reopen returns or reject disputes."],
+  "payouts.manage": ["Manage payouts", "Run and settle seller payouts, holds and adjustments; tax reports (GSTR-8, TDS 194-O), reconciliation and COD remittances."],
 };
 
 /** { key, resource, action, group, label, description } for a permission key. */
@@ -282,13 +333,22 @@ export function permissionInfo(key) {
  * custom or tenant-scoped role — not even by a platform admin — because `authorize("tenants.edit")`
  * etc. are not tenant-scoped checks.
  */
-export const PLATFORM_ONLY_PERMISSIONS = ["*", "tenants.view", "tenants.create", "tenants.edit", "tenants.suspend"];
+export const PLATFORM_ONLY_PERMISSIONS = ["*", "tenants.view", "tenants.create", "tenants.edit", "tenants.suspend", "sellers.review", "billing.manage", "payouts.manage", "disputes.manage"];
 
 export function isPlatformOnlyPermission(p) {
-  return PLATFORM_ONLY_PERMISSIONS.includes(p) || String(p).startsWith("tenants.");
+  return PLATFORM_ONLY_PERMISSIONS.includes(p) || String(p).startsWith("tenants.") || String(p).startsWith("sellers.");
 }
 
-export const TENANT_ADMIN_PERMISSIONS = PERMISSIONS.filter((p) => !isPlatformOnlyPermission(p));
+/**
+ * Permissions held only by a system role and never grantable to (or listed for) custom roles.
+ * `rider.app` belongs to the system rider role alone.
+ */
+export const SYSTEM_ROLE_ONLY_PERMISSIONS = ["rider.app"];
+
+export const TENANT_ADMIN_PERMISSIONS = PERMISSIONS.filter((p) => !isPlatformOnlyPermission(p) && !SYSTEM_ROLE_ONLY_PERMISSIONS.includes(p));
+
+/** Phase 5: the delivery rider role (rider app only). */
+export const RIDER_PERMISSIONS = ["rider.app"];
 
 export const SUPPORT_AGENT_PERMISSIONS = [
   "chat.view",
@@ -319,4 +379,55 @@ export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 /** Upload types accepted by utils/storage.js. The type is sniffed from magic bytes, never trusted from the client. */
 export const ALLOWED_MIME = ["image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf"];
 /** Folder names accepted by utils/storage.js (anything else -> "general"). */
-export const UPLOAD_FOLDERS = ["general", "catalog", "products", "brands", "categories", "cms", "tenants", "avatars", "chat", "invoices", "reviews"];
+export const UPLOAD_FOLDERS = ["general", "catalog", "products", "brands", "categories", "cms", "tenants", "avatars", "chat", "invoices", "reviews", "kyc", "delivery", "disputes"];
+/**
+ * Folders that are ALWAYS stored privately (utils/storage.js privateRoot, never under the public
+ * /uploads static route) and served only by GET /api/v1/files/private/:id after an ownership check.
+ */
+export const PRIVATE_UPLOAD_FOLDERS = ["kyc", "delivery", "disputes"];
+
+/* ------------------------------------------------------------------ seller onboarding (phase 2, p2-onboarding) */
+
+/**
+ * Seller applicant: a self-registered seller account (tenantId null) that can only use
+ * /seller-applications/me*, /auth/me and its own KYC uploads until approved. On approval
+ * tenants/service.js createTenantFromApplication moves it into the new store as tenant_admin.
+ */
+export const SELLER_APPLICANT_ROLE = "seller_applicant";
+/** Deliberately empty: every applicant route is gated by the role slug, never by permissions. */
+export const SELLER_APPLICANT_PERMISSIONS = [];
+
+export const SELLER_APPLICATION_STATUSES = ["draft", "submitted", "under_review", "more_info_needed", "approved", "rejected"];
+export const SELLER_DOCUMENT_TYPES = ["gst_certificate", "pan_card", "cancelled_cheque", "fssai", "other"];
+/** Days a rejected applicant waits before POST /seller-applications/me/reapply. */
+export const SELLER_REAPPLY_DAYS = 30;
+
+export const SELLER_EVENTS = {
+  APPLIED: "SELLER_APPLIED",
+  SUBMITTED: "SELLER_APPLICATION_SUBMITTED",
+  MORE_INFO: "SELLER_MORE_INFO",
+  APPROVED: "SELLER_APPROVED",
+  REJECTED: "SELLER_REJECTED",
+};
+
+/* ------------------------------------------------------------------ own delivery fleet (phase 5, p5-backend) */
+
+/** How an order reaches the buyer: the store's own riders, a delivery partner / courier, or store pickup. */
+export const DELIVERY_METHODS = ["own_fleet", "partner", "pickup"];
+export const DELIVERY_ZONE_METHODS = ["own_fleet", "partner"];
+export const RIDER_VEHICLE_TYPES = ["bike", "scooter", "cycle", "van", "other"];
+export const RIDER_ID_PROOF_TYPES = ["aadhaar", "dl", "voter", "pan", "other"];
+export const DELIVERY_TASK_KINDS = ["delivery", "return_pickup"];
+export const DELIVERY_TASK_STATUSES = [
+  "unassigned",
+  "assigned",
+  "accepted",
+  "picked_up",
+  "out_for_delivery",
+  "delivered",
+  "failed",
+  "returning",
+  "returned_to_store",
+  "cancelled",
+];
+export const DELIVERY_FAIL_REASONS = ["buyer_unavailable", "address_not_found", "buyer_refused", "cash_not_ready", "other"];

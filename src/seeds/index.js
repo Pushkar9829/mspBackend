@@ -9,6 +9,9 @@ import {
   TENANT_ADMIN_PERMISSIONS,
   SUPPORT_AGENT_PERMISSIONS,
   BUYER_PERMISSIONS,
+  SELLER_APPLICANT_ROLE,
+  SELLER_APPLICANT_PERMISSIONS,
+  RIDER_PERMISSIONS,
   permissionInfo,
 } from "../config/constants.js";
 import { env } from "../config/env.js";
@@ -44,6 +47,22 @@ const SYSTEM_ROLE_DEFS = [
     permissions: BUYER_PERMISSIONS,
     scope: "tenant",
     description: "Marketplace buyer",
+  },
+  {
+    // Phase 2: self-registered seller awaiting approval (tenantId null). Minimal on purpose.
+    slug: SELLER_APPLICANT_ROLE,
+    name: "Seller Applicant",
+    permissions: SELLER_APPLICANT_PERMISSIONS,
+    scope: "tenant",
+    description: "Seller sign-up awaiting approval (onboarding pages only)",
+  },
+  {
+    // Phase 5: a store's own delivery rider (mobile + OTP login, rider app only). Not staff.
+    slug: SYSTEM_ROLES.RIDER,
+    name: "Delivery Rider",
+    permissions: RIDER_PERMISSIONS,
+    scope: "tenant",
+    description: "Store delivery rider (rider app only)",
   },
 ];
 

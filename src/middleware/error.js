@@ -58,7 +58,11 @@ export function errorHandler(err, req, res, _next) {
   if (err instanceof AppError) {
     const status = err.status || 500;
     if (status >= 500) logger.error("app error", { requestId: req.requestId, err });
-    return send(res, req, status, status >= 500 ? "Server error" : err.message, err.code || "ERROR", status >= 500 ? {} : err.extra || {});
+    // A plain 500 AppError is an internal fault (e.g. role not seeded, key missing): masked.
+    // 501-504 are deliberate operational errors (provider not configured / unavailable): their
+    // message is written for the user and is passed through.
+    const masked = status === 500 || status > 599;
+    return send(res, req, status, masked ? "Server error" : err.message, err.code || "ERROR", masked ? {} : err.extra || {});
   }
 
   // Body parser / multer errors

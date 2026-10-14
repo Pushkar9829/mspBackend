@@ -135,7 +135,7 @@ async function main() {
     { _id: a.tenant._id },
     { $set: { name: "Alpha Traders", slug: "alpha-traders", status: "active", "pickupAddress.city": "Pune", "branding.logo": "/uploads/alpha.png", "orderRules.minOrderValue": 500 } }
   );
-  await Tenant.updateOne({ _id: b.tenant._id }, { $set: { name: "Beta Mart", slug: "beta-mart", status: "trial", "pickupAddress.city": "Mumbai" } });
+  await Tenant.updateOne({ _id: b.tenant._id }, { $set: { name: "Beta Mart", slug: "beta-mart", status: "active", "pickupAddress.city": "Mumbai" } });
   await Tenant.updateOne({ _id: s.tenant._id }, { $set: { name: "Suspended Co", slug: "suspended-co", status: "suspended" } });
   invalidateActiveTenants();
   await Settings.create({ scope: "tenant", tenantId: a.tenant._id, key: "store.displayName", value: "Alpha Wholesale" });
@@ -198,7 +198,7 @@ async function main() {
   console.log("\n# GET /tenants/public");
   res = await call("GET", "/tenants/public");
   const alpha = res.data.data?.find((t) => t.slug === "alpha-traders");
-  check(res.status === 200 && res.data.meta.total === 2 && !res.data.data.some((t) => t.slug === "suspended-co"), "active + trial stores only");
+  check(res.status === 200 && res.data.meta.total === 2 && !res.data.data.some((t) => t.slug === "suspended-co"), "active stores only");
   check(
     alpha &&
       alpha.displayName === "Alpha Wholesale" &&
@@ -360,12 +360,12 @@ async function main() {
   /* ------------------------------------------------------------------ 8. register / profile */
   console.log("\n# register businessType / GSTIN");
   check(isValidGstin("27AAPFU0939F1ZV") && !isValidGstin("27AAPFU0939F1ZX") && !isValidGstin("99AAPFU0939F1ZV"), "GSTIN check digit + state code");
-  res = await call("POST", "/auth/register", { json: { name: "Kirana One", email: "k1@sf3.test", password: "password123", businessType: "Retailer", gstin: "27aapfu0939f1zv" } });
+  res = await call("POST", "/auth/register", { json: { name: "Kirana One", email: "k1@sf3.test", password: "Kirana#Pass1", businessType: "Retailer", gstin: "27aapfu0939f1zv" } });
   const k1 = await User.findOne({ email: "k1@sf3.test" }).lean();
   check(res.status === 201 && k1?.profile.businessType === "kirana" && k1.profile.gstin === "27AAPFU0939F1ZV", "register stores businessType (alias normalised) and GSTIN");
-  res = await call("POST", "/auth/register", { json: { name: "Bad Gst", email: "k2@sf3.test", password: "password123", gstin: "27AAPFU0939F1ZX" } });
+  res = await call("POST", "/auth/register", { json: { name: "Bad Gst", email: "k2@sf3.test", password: "Kirana#Pass1", gstin: "27AAPFU0939F1ZX" } });
   check(res.status === 400 && res.data.fields?.gstin, "invalid GSTIN check digit → 400 fields.gstin");
-  res = await call("POST", "/auth/register", { json: { name: "Bad Type", email: "k3@sf3.test", password: "password123", businessType: "spaceship" } });
+  res = await call("POST", "/auth/register", { json: { name: "Bad Type", email: "k3@sf3.test", password: "Kirana#Pass1", businessType: "spaceship" } });
   check(res.status === 400 && res.data.fields?.businessType, "unknown businessType → 400");
   res = await call("PATCH", "/auth/me", { token: ob.token, json: { businessType: "restaurant", gstin: "29AAGCB7383J1Z4" } });
   check(res.status === 200 && res.data.businessType === "horeca" && res.data.gstin === "29AAGCB7383J1Z4" && res.data.profile.businessType === "horeca", "PATCH /auth/me sets and returns them");

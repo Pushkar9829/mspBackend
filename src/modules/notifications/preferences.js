@@ -5,7 +5,8 @@ import { links } from "../../utils/links.js";
 import { NotificationPreference, DEFAULT_PREFERENCES, LOCKED_CHANNELS } from "./preference.model.js";
 import { NOTIFICATION_CATEGORIES } from "./notification.model.js";
 
-export const CHANNELS = ["inApp", "email", "sms"];
+/** `push` (phase 6) = mobile push (FCM) to the buyer / rider app. */
+export const CHANNELS = ["inApp", "email", "sms", "push"];
 
 export const EVENT_CATEGORY = {
   ORDER_CREATED: "order",
@@ -20,6 +21,16 @@ export const EVENT_CATEGORY = {
   ORDER_RETURN_REQUESTED: "order",
   ORDER_REFUNDED: "order",
   ORDER_TIMEOUT: "order",
+  ORDER_RETURN_APPROVED: "order",
+  ORDER_RETURN_REJECTED: "order",
+  ORDER_RETURNED: "order",
+  ORDER_REFUND_PROCESSED: "order",
+  ORDER_RTO_IN_TRANSIT: "order",
+  ORDER_RETURNED_TO_ORIGIN: "order",
+  ORDER_AUTO_CANCELLED: "order",
+  PAYMENT_FAILED: "order",
+  PAYMENT_MISMATCH: "order",
+  REFUND_FAILED: "order",
   NEW_ORDER: "order",
   LOW_STOCK: "inventory",
   OUT_OF_STOCK: "inventory",
@@ -32,6 +43,21 @@ export const EVENT_CATEGORY = {
   GLOBAL_ANNOUNCEMENT: "marketing",
   ACCOUNT_LOGIN: "account",
   TENANT_SUSPENDED: "account",
+  RIDER_ASSIGNED: "order",
+  RIDER_REJECTED_TASK: "order",
+  DELIVERY_ATTEMPT_FAILED: "order",
+  DELIVERY_METHOD_CHANGED: "order",
+  ORDER_RETURN_PICKUP_SCHEDULED: "order",
+  ORDER_RETURN_PICKUP_FAILED: "order",
+  ORDER_RETURN_QC_REJECTED: "order",
+  SELLER_DEADLINE_SOON: "order",
+  REFUND_OVERDUE: "order",
+  DISPUTE_OPENED: "order",
+  DISPUTE_MESSAGE: "order",
+  DISPUTE_INFO_REQUESTED: "order",
+  DISPUTE_UNDER_REVIEW: "order",
+  DISPUTE_DECIDED: "order",
+  DISPUTE_WITHDRAWN: "order",
 };
 
 export function categoryFor(event) {

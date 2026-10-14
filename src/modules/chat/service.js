@@ -7,6 +7,7 @@ import { Role } from "../rbac/role.model.js";
 import { Order } from "../orders/order.model.js";
 import { Product } from "../catalog/product.model.js";
 import { Tenant } from "../tenants/tenant.model.js";
+import { STOREFRONT_TENANT_STATUSES } from "../catalog/service.js";
 import { Settings } from "../settings/settings.model.js";
 import { AppError } from "../../utils/AppError.js";
 import { tenantFilter } from "../../middleware/tenantScope.js";
@@ -151,6 +152,11 @@ export async function startConversation(req, body) {
   if (tenantId) {
     const tenant = await Tenant.findById(tenantId).select("_id status");
     if (!tenant) throw new AppError(404, "Store not found", "NOT_FOUND");
+    // Buyers can't open new (non-order) chats with a store that isn't selling; chats about an
+    // existing order stay open so buyers can still get help with it.
+    if (isBuyer(req) && !orderId && !STOREFRONT_TENANT_STATUSES.includes(tenant.status)) {
+      throw new AppError(400, "This store is not available right now", "STORE_INACTIVE");
+    }
     tenantId = tenant._id;
   } else if (!req.isPlatformAdmin && !isBuyer(req)) {
     throw new AppError(400, "tenantId required", "VALIDATION_ERROR");

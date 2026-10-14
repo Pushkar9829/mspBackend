@@ -6,7 +6,7 @@ import { Coupon } from "../pricing/coupon.model.js";
 import { Order } from "../orders/order.model.js";
 import { Tenant } from "../tenants/tenant.model.js";
 import { storeCards } from "../tenants/storeCard.js";
-import { activeTenantIds } from "../catalog/service.js";
+import { activeTenantIds, STOREFRONT_TENANT_STATUSES } from "../catalog/service.js";
 import {
   calculateLinePrice,
   priceBagCoupon,
@@ -31,7 +31,8 @@ import {
   releaseCartHold,
   reownReservation,
 } from "../inventory/service.js";
-import { checkServiceability, etaWindow } from "../location/service.js";
+import { checkServiceability, etaWindow, matchZone } from "../location/service.js";
+import { quoteDelivery, shiprocketConfigured } from "../shipping/shiprocket.js";
 import { FULFILLMENT_MODES, CART_RESERVATION_MINUTES } from "../../config/constants.js";
 import { computePlatformFee, getCommerceSettings, pickPartner } from "../settings/commerce.js";
 import { withTransaction, withSession } from "../../utils/transaction.js";
@@ -43,6 +44,27 @@ export function resolveFulfillment(product, requested) {
   if (allowed.includes("delivery_partner")) return "delivery_partner";
   return allowed[0];
 }
+
+/** Products a buyer may buy: published and not disabled by the seller/admin. */
+export function productSellable(product) {
+  return Boolean(product) && product.status === "published" && product.enabled !== false;
+}
+
+/**
+ * Tenant ids (strings) among `tenantIds` whose store can currently sell (fresh read, not the
+ * 30s storefront cache, so a just-suspended store stops selling immediately). `trial` still
+ * counts as selling for now (STOREFRONT_TENANT_STATUSES).
+ */
+export async function sellingTenantIds(tenantIds, session = null) {
+  const ids = [...new Set((tenantIds || []).filter(Boolean).map(String))];
+  if (!ids.length) return new Set();
+  const query = Tenant.find({ _id: { $in: ids }, status: { $in: STOREFRONT_TENANT_STATUSES } }).select("_id");
+  if (session) query.session(session);
+  const rows = await query.lean();
+  return new Set(rows.map((t) => String(t._id)));
+}
+
+const STORE_INACTIVE_MESSAGE = "This store is not accepting orders right now";
 
 function holdExpiry() {
   return new Date(Date.now() + CART_RESERVATION_MINUTES * 60 * 1000);
@@ -352,8 +374,11 @@ export async function addItem(userId, guestKey, { variantId, qty, fulfillmentMod
   const variant = await ProductVariant.findById(variantId);
   if (!variant || variant.status !== "active") throw new AppError(404, "Variant not found", "NOT_FOUND");
   const product = await Product.findById(variant.productId);
-  if (!product || product.status !== "published") {
+  if (!productSellable(product)) {
     throw new AppError(400, "Product is not available", "UNAVAILABLE");
+  }
+  if (!(await sellingTenantIds([product.tenantId])).has(String(product.tenantId))) {
+    throw new AppError(400, STORE_INACTIVE_MESSAGE, "STORE_INACTIVE");
   }
   // `bulk` is only a hint now (one line per variant; bulk is derived from the quantity):
   // asking for bulk on a product that is not bulk-eligible is still rejected, and a new line
@@ -409,8 +434,11 @@ export async function updateItem(userId, guestKey, itemId, { qty, fulfillmentMod
       Product.findById(item.productId).session(session),
       ProductVariant.findById(item.variantId).session(session),
     ]);
-    if (!product || !variant || product.status !== "published" || variant.status !== "active") {
+    if (!productSellable(product) || !variant || variant.status !== "active") {
       throw new AppError(400, "Product is not available", "UNAVAILABLE");
+    }
+    if (!(await sellingTenantIds([item.tenantId], session)).has(String(item.tenantId))) {
+      throw new AppError(400, STORE_INACTIVE_MESSAGE, "STORE_INACTIVE");
     }
     if (fulfillmentMode) {
       const mode = resolveFulfillment(product, fulfillmentMode);
@@ -472,6 +500,23 @@ function issueLine(item, product, variant, issue, code) {
 
 
 /**
+ * Phase 5: the store's delivery zone serving `address` when that zone is delivered by the store's
+ * own riders (zone.method "own_fleet"), else null (partner / courier, as before).
+ */
+async function ownFleetZone(tenantId, address) {
+  const tenant = await Tenant.findById(tenantId).select("deliveryZones").lean();
+  const zones = tenant?.deliveryZones || [];
+  if (!zones.some((z) => z.method === "own_fleet")) return null;
+  const match = matchZone(zones, {
+    postalCode: address.postalCode,
+    latitude: address.latitude,
+    longitude: address.longitude,
+    approximate: address.geoApproximate,
+  });
+  return match.serviceable && match.zone?.method === "own_fleet" ? match.zone : null;
+}
+
+/**
  * Prices the cart (read-only: never reserves or releases stock). Lines that can no longer be
  * bought (unpublished, rule violation, no stock) are returned in `unavailable` instead of
  * throwing, so the buyer can always fix the cart.
@@ -497,11 +542,16 @@ export async function quoteCart(cart, buyerId, address = null, { strictCoupon = 
     ? await StockReservation.find({ _id: { $in: holdIds }, status: "held" }).select("_id expiresAt").lean()
     : [];
   const holdExpiry = new Map(liveHolds.map((row) => [String(row._id), row.expiresAt || null]));
+  const sellingTenants = await sellingTenantIds(cart.items.map((item) => item.tenantId));
   for (const item of cart.items) {
     const variant = await ProductVariant.findById(item.variantId);
     const product = await Product.findById(item.productId).populate("brandId", "name");
-    if (!variant || !product || product.status !== "published" || variant.status !== "active") {
+    if (!variant || !productSellable(product) || variant.status !== "active") {
       unavailable.push(issueLine(item, product, variant, "No longer available", "UNAVAILABLE"));
+      continue;
+    }
+    if (!sellingTenants.has(String(item.tenantId))) {
+      unavailable.push(issueLine(item, product, variant, STORE_INACTIVE_MESSAGE, "STORE_INACTIVE"));
       continue;
     }
     const lineBulk = isBulkQty(product, item.qty);
@@ -611,7 +661,42 @@ export async function quoteCart(cart, buyerId, address = null, { strictCoupon = 
     let deliveryFee = 0;
     let serviceability = { serviceable: true };
     let eta = null;
+    let shiprocketQuote = null;
+    // Phase 5: the buyer's delivery zone decides own riders vs delivery partner.
+    let ownFleet = false;
     if (address && hasDelivery) {
+      const fleetZone = await ownFleetZone(tenantId, address);
+      if (fleetZone) {
+        ownFleet = true;
+        serviceability = { serviceable: true, zone: fleetZone, method: "own_fleet" };
+        deliveryFee = round2(fleetZone.deliveryFee || 0);
+        const lead = Math.max(...items.map((i) => (i.bulk ? i.wholesale?.leadTimeDays || 0 : 0)));
+        eta = etaWindow(fleetZone, lead);
+      }
+    }
+    if (ownFleet) {
+      // Delivered by the store's own riders: no courier quote, no partner choice or fee.
+    } else if (address && hasDelivery && shiprocketConfigured()) {
+      const store = await Tenant.findById(tenantId).select("pickupAddress.postalCode").lean();
+      const grams = items.reduce((sum, item) => {
+        const unit = Number(item.weightGrams) || Number(item.attributes?.weight) || 0;
+        return sum + unit * (Number(item.qty) || 1);
+      }, 0);
+      const weightKg = Math.max(0.5, Math.round((grams || 500) / 100) / 10);
+      shiprocketQuote = await quoteDelivery({
+        pickupPostcode: store?.pickupAddress?.postalCode,
+        deliveryPostcode: address.postalCode,
+        weightKg,
+        cod: false,
+      });
+      if (!shiprocketQuote.serviceable) {
+        throw new AppError(400, "Delivery not available for this address", "NOT_SERVICEABLE");
+      }
+      const lead = Math.max(...items.map((i) => (i.bulk ? i.wholesale?.leadTimeDays || 0 : 0)));
+      const days = shiprocketQuote.etaDays || 1;
+      eta = etaWindow({ etaDaysMin: days, etaDaysMax: days }, lead);
+      serviceability = { serviceable: true, carrier: "shiprocket", rate: shiprocketQuote.rate };
+    } else if (address && hasDelivery) {
       serviceability = await checkServiceability({
         tenantId,
         postalCode: address.postalCode,
@@ -628,9 +713,16 @@ export async function quoteCart(cart, buyerId, address = null, { strictCoupon = 
     }
 
     const commerce = await getCommerceSettings(tenantId);
-    const partner = hasDelivery
+    let partner = hasDelivery && !ownFleet
       ? pickPartner(commerce.deliveryPartners, deliveryPartnerId, commerce.deliveryPartnerChoiceEnabled)
       : null;
+    if (hasDelivery && shiprocketQuote?.serviceable) {
+      partner = { id: "shiprocket", name: "Shiprocket Quick", fee: shiprocketQuote.rate };
+    }
+    if (ownFleet) {
+      const card = cards.get(String(tenantId));
+      partner = { id: "own_fleet", name: card?.displayName || card?.name || "Store delivery", fee: 0 };
+    }
     const platformFee = computePlatformFee(commerce, Math.max(0, subtotal - couponDiscount), {
       includeFlat: groupIndex === 0,
     });
@@ -663,9 +755,11 @@ export async function quoteCart(cart, buyerId, address = null, { strictCoupon = 
       platformFee,
       partnerFee,
       deliveryPartner: partner,
-      deliveryPartnerMatched: !deliveryPartnerId || !partner || partner.id === deliveryPartnerId,
-      deliveryPartnerChoiceEnabled: commerce.deliveryPartnerChoiceEnabled,
-      deliveryPartners: commerce.deliveryPartners,
+      deliveryPartnerMatched: ownFleet || !deliveryPartnerId || !partner || partner.id === deliveryPartnerId,
+      deliveryPartnerChoiceEnabled: shiprocketQuote || ownFleet ? false : commerce.deliveryPartnerChoiceEnabled,
+      deliveryPartners: ownFleet ? [] : commerce.deliveryPartners,
+      /** Phase 5: own_fleet (store's riders) | partner | pickup (store pickup lines only). */
+      deliveryMethod: ownFleet ? "own_fleet" : hasDelivery ? "partner" : "pickup",
       platformFeeEnabled: commerce.feeEnabled,
       codEnabled: commerce.codEnabled,
       freeDeliveryAbove,
@@ -766,7 +860,7 @@ export async function mergeGuestCart(userId, guestKey) {
           Product.findById(item.productId).session(session),
           ProductVariant.findById(item.variantId).session(session),
         ]);
-        if (!product || !variant || product.status !== "published" || variant.status !== "active") continue;
+        if (!productSellable(product) || !variant || variant.status !== "active") continue;
         let line = mine.items.find((i) => sameLine(i, item.variantId));
         let qty = (line?.qty || 0) + item.qty;
         const otherLines = variantQtyInCart(mine, variant._id, { excludeItemId: line?._id });

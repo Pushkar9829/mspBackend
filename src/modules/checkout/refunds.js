@@ -3,9 +3,14 @@ import { createRefund, fetchRefund, toPaise } from "./razorpayApi.js";
 import { withSession, afterCommit } from "../../utils/transaction.js";
 import { emitDomain } from "../../utils/events.js";
 import { orderUpdatedAfterCommit, emitOrderUpdated } from "../orders/events.js";
+import { applyEntry } from "../ledger/service.js";
+import { AppError } from "../../utils/AppError.js";
+import { onRefundQueued } from "../payouts/ledger.js";
 
 const LOCK_MS = 2 * 60 * 1000;
-const MAX_ATTEMPTS = 8;
+export const MAX_ATTEMPTS = 8;
+/** Refund rows the Razorpay worker handles (rows created before `method` existed have none). */
+const RAZORPAY_METHOD = { $in: ["razorpay", null] };
 /** Refunds still pending at Razorpay are polled this long after the last check (webhook fallback). */
 const POLL_AFTER_MS = 6 * 60 * 60 * 1000;
 
@@ -43,6 +48,8 @@ export async function queueRefund(order, { key, amount, reason = "", paymentId =
     withSession(session)
   );
   if (res.modifiedCount) {
+    // Seller ledger (p4-payouts): refund + fee / TCS / TDS reversal lines, same transaction.
+    await onRefundQueued(order, { key, amount, reason, method: "razorpay" }, { session });
     orderUpdatedAfterCommit(session, order);
     afterCommit(session, () => processRefund(order._id, key));
     return true;
@@ -50,7 +57,25 @@ export async function queueRefund(order, { key, amount, reason = "", paymentId =
   return false;
 }
 
-async function markRefundProcessed(orderId, key, providerRefundId) {
+/** ORDER_REFUND_PROCESSED payload (money has actually reached the buyer / their account). */
+function processedPayload(order, row) {
+  return {
+    orderId: order._id,
+    orderNumber: order.orderNumber,
+    key: row.key,
+    providerRefundId: row.providerRefundId || "",
+    amount: row.amount,
+    method: row.method || "razorpay",
+    destinationType: row.destination?.type || "",
+    payoutReference: row.payoutReference || "",
+    tenantId: order.tenantId,
+    buyerId: order.buyerId,
+    resource: "order",
+    resourceId: order._id,
+  };
+}
+
+async function markRefundProcessed(orderId, key, providerRefundId, { extraSet = {}, session = null } = {}) {
   const updated = await Order.findOneAndUpdate(
     { _id: orderId, refunds: { $elemMatch: { key, status: { $ne: "processed" } } } },
     {
@@ -59,19 +84,135 @@ async function markRefundProcessed(orderId, key, providerRefundId) {
         "refunds.$.providerRefundId": providerRefundId || "",
         "refunds.$.processedAt": new Date(),
         "refunds.$.lockedUntil": null,
+        ...extraSet,
       },
     },
-    { new: true }
+    withSession(session, { new: true })
   );
   if (!updated) return null;
   const refunded = updated.refunds
     .filter((r) => r.status === "processed" && !isStrayRefundKey(r.key))
     .reduce((s, r) => s + r.amount, 0);
   if (refunded + 0.005 >= Number(updated.total)) {
-    await Order.updateOne({ _id: orderId, paymentStatus: { $ne: "refunded" } }, { $set: { paymentStatus: "refunded" } });
+    await Order.updateOne({ _id: orderId, paymentStatus: { $ne: "refunded" } }, { $set: { paymentStatus: "refunded" } }, withSession(session));
   }
-  emitDomain("ORDER_REFUND_PROCESSED", { orderId, key, providerRefundId, tenantId: updated.tenantId, buyerId: updated.buyerId });
-  await emitOrderUpdated(orderId);
+  const payload = processedPayload(updated, updated.refunds.find((r) => r.key === key));
+  if (session) {
+    orderUpdatedAfterCommit(session, updated);
+    afterCommit(session, () => emitDomain("ORDER_REFUND_PROCESSED", payload));
+  } else {
+    emitDomain("ORDER_REFUND_PROCESSED", payload);
+    await emitOrderUpdated(orderId);
+  }
+  return updated;
+}
+
+/* ------------------------------------------------- offline / ledger refunds */
+
+/**
+ * Credit / PO orders: the ledger credit itself is written by the caller (ledger service); this
+ * records it as a refund row (`method: ledger_credit`, processed) so every refund has a record.
+ */
+export async function recordLedgerRefund(order, { key, amount, reason = "", returnId = null, session = null }) {
+  const value = Math.round(Number(amount) * 100) / 100;
+  if (!(value > 0)) return false;
+  const res = await Order.updateOne(
+    { _id: order._id, "refunds.key": { $ne: key } },
+    {
+      $push: {
+        refunds: { key, provider: "ledger", method: "ledger_credit", amount: value, status: "processed", reason, returnId, processedAt: new Date() },
+      },
+    },
+    withSession(session)
+  );
+  if (!res.modifiedCount) return false;
+  await onRefundQueued(order, { key, amount: value, reason, method: "ledger_credit" }, { session });
+  orderUpdatedAfterCommit(session, order);
+  const payload = processedPayload(order, { key, amount: value, method: "ledger_credit" });
+  afterCommit(session, () => emitDomain("ORDER_REFUND_PROCESSED", payload));
+  return true;
+}
+
+/** Credit the buyer's account with this store (store credit for an offline refund). */
+async function creditStore(order, row, session) {
+  await applyEntry({
+    userId: order.buyerId?._id || order.buyerId,
+    tenantId: order.tenantId?._id || order.tenantId,
+    type: "credit",
+    kind: "adjustment",
+    amount: row.amount,
+    note: `Store credit refund ${order.orderNumber}`,
+    reference: row.key,
+    orderId: order._id,
+    session,
+  });
+}
+
+/**
+ * COD (offline) refund: the money is paid out by the platform, never by the seller. Recorded as
+ * `method: cod`, `status: pending_payout` until the platform marks it paid with a reference
+ * (markPayoutPaid). A `store_credit` destination is settled at once as a ledger credit.
+ */
+export async function queueOfflineRefund(order, { key, amount, reason = "", destination = null, returnId = null, session = null }) {
+  const value = Math.round(Number(amount) * 100) / 100;
+  if (!(value > 0)) return false;
+  const dest = destination?.type ? destination : { type: "" };
+  const res = await Order.updateOne(
+    { _id: order._id, "refunds.key": { $ne: key } },
+    {
+      $push: {
+        refunds: { key, provider: "manual", method: "cod", amount: value, status: "pending_payout", reason, returnId, destination: dest },
+      },
+    },
+    withSession(session)
+  );
+  if (!res.modifiedCount) return false;
+  await onRefundQueued(order, { key, amount: value, reason, method: "cod" }, { session });
+  orderUpdatedAfterCommit(session, order);
+  if (dest.type === "store_credit") {
+    await creditStore(order, { key, amount: value }, session);
+    await markRefundProcessed(order._id, key, "", { session });
+  }
+  return true;
+}
+
+/**
+ * Buyer (or platform) sets where a pending COD refund should go; store_credit settles it at once.
+ * Run inside a transaction (`session`).
+ */
+export async function setRefundDestination(orderId, key, destination, { session = null } = {}) {
+  const updated = await Order.findOneAndUpdate(
+    { _id: orderId, refunds: { $elemMatch: { key, method: "cod", status: "pending_payout" } } },
+    { $set: { "refunds.$.destination": destination } },
+    withSession(session, { new: true })
+  );
+  if (!updated) throw new AppError(409, "This refund is not waiting for payout details", "INVALID_STATE");
+  orderUpdatedAfterCommit(session, updated);
+  if (destination.type === "store_credit") {
+    await creditStore(updated, updated.refunds.find((r) => r.key === key), session);
+    return markRefundProcessed(orderId, key, "", { session });
+  }
+  return updated;
+}
+
+/** Platform records that it paid an offline refund (UTR / transaction reference). */
+export async function markPayoutPaid(orderId, key, { reference, actorId = null, session = null }) {
+  const ref = String(reference || "").trim();
+  if (!ref) throw new AppError(400, "Enter the payout reference (UTR / transaction id)", "VALIDATION_ERROR");
+  const order = await Order.findOne({ _id: orderId, "refunds.key": key }, null, withSession(session));
+  const row = order?.refunds.find((r) => r.key === key);
+  if (!row) throw new AppError(404, "Refund not found", "NOT_FOUND");
+  if (row.method !== "cod" || row.status !== "pending_payout") {
+    throw new AppError(409, `Refund is ${row.status}; only pending offline payouts can be marked paid`, "INVALID_STATE");
+  }
+  if (!["upi", "bank"].includes(row.destination?.type)) {
+    throw new AppError(409, "The buyer has not provided a UPI id or bank account for this refund yet", "DESTINATION_REQUIRED");
+  }
+  const updated = await markRefundProcessed(orderId, key, "", {
+    extraSet: { "refunds.$.payoutReference": ref.slice(0, 100), "refunds.$.paidBy": actorId || null },
+    session,
+  });
+  if (!updated) throw new AppError(409, "Refund changed. Refresh and try again.", "INVALID_STATE");
   return updated;
 }
 
@@ -84,6 +225,7 @@ export async function processRefund(orderId, key) {
       refunds: {
         $elemMatch: {
           key,
+          method: RAZORPAY_METHOD,
           status: { $in: ["pending", "failed", "processing"] },
           providerRefundId: "",
           attempts: { $lt: MAX_ATTEMPTS },
@@ -100,6 +242,9 @@ export async function processRefund(orderId, key) {
   if (!claimed) return null;
   const refund = claimed.refunds.find((r) => r.key === key);
   try {
+    // Razorpay Route (p4-payouts): pull the seller's part back from a still-held transfer first.
+    const { reverseForRefund } = await import("../payouts/route.js");
+    await reverseForRefund(claimed, refund);
     const result = await createRefund({
       paymentId: refund.paymentId,
       amountPaise: toPaise(refund.amount),
@@ -121,6 +266,28 @@ export async function processRefund(orderId, key) {
       { $set: { "refunds.$.status": "failed", "refunds.$.lastError": String(err.message || err).slice(0, 300), "refunds.$.lockedUntil": null } }
     );
     console.error("refund failed", String(orderId), key, err.message);
+    if ((refund.attempts || 0) >= MAX_ATTEMPTS) {
+      // Out of automatic attempts: alert the platform once (staff can retry from the refunds list).
+      const flagged = await Order.findOneAndUpdate(
+        { _id: orderId, refunds: { $elemMatch: { key, alertedAt: null } } },
+        { $set: { "refunds.$.alertedAt": new Date() } },
+        { new: true }
+      );
+      if (flagged) {
+        emitDomain("REFUND_FAILED", {
+          orderId,
+          orderNumber: flagged.orderNumber,
+          tenantId: flagged.tenantId,
+          buyerId: flagged.buyerId,
+          key,
+          amount: refund.amount,
+          attempts: refund.attempts,
+          error: String(err.message || err).slice(0, 300),
+          resource: "order",
+          resourceId: orderId,
+        });
+      }
+    }
     await emitOrderUpdated(orderId);
     return null;
   }
@@ -199,6 +366,7 @@ export async function processPendingRefunds({ limit = 25 } = {}) {
   const orders = await Order.find({
     refunds: {
       $elemMatch: {
+        method: RAZORPAY_METHOD,
         status: { $in: ["pending", "failed", "processing"] },
         providerRefundId: "",
         attempts: { $lt: MAX_ATTEMPTS },
@@ -212,7 +380,8 @@ export async function processPendingRefunds({ limit = 25 } = {}) {
   let done = 0;
   for (const order of orders) {
     for (const row of order.refunds) {
-      if (row.providerRefundId || row.status === "processed") continue;
+      if (row.providerRefundId || !["pending", "failed", "processing"].includes(row.status)) continue;
+      if (row.method && row.method !== "razorpay") continue;
       if (await processRefund(order._id, row.key)) done += 1;
     }
   }

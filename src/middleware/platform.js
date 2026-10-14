@@ -6,6 +6,7 @@ import { env } from "../config/env.js";
 import { notFound } from "./error.js";
 import { uploadRoot } from "../utils/storage.js";
 import { logger } from "../utils/logger.js";
+import privateFilesRouter from "../modules/files/routes.js";
 
 const SERVED_UPLOAD_EXT = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".pdf"]);
 const IMAGE_EXT = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
@@ -48,7 +49,12 @@ export async function runCron(req, res, next) {
   }
 }
 
-/** Mounts /uploads (hardened static), /api/health, /api/ready and /api/internal/cron/:name. */
+/**
+ * Mounts /uploads (hardened static, PUBLIC files only), /api/v1/files (private uploads: KYC etc.,
+ * authenticated + ownership-checked, see modules/files/routes.js), /api/health, /api/ready and
+ * /api/internal/cron/:name. Private files live in storage.privateRoot, which is outside uploadRoot
+ * and therefore never reachable through /uploads.
+ */
 export function mountPlatformRoutes(app) {
   // User uploads: never executable in the API origin.
   app.use(
@@ -64,6 +70,9 @@ export function mountPlatformRoutes(app) {
     },
     express.static(uploadRoot, { dotfiles: "deny", index: false, redirect: false, fallthrough: true, maxAge: "7d" })
   );
+
+  // Private uploads (never via the static route above).
+  app.use("/api/v1/files", privateFilesRouter);
 
   // Liveness: process is up.
   app.get("/api/health", (req, res) => {

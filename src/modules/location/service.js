@@ -38,7 +38,8 @@ export async function geocodeAddress({ postalCode, city, state, addressLine1 }) 
       /* fall through to a local pin */
     }
   }
-  return geocodeStub({ postalCode, city, addressLine1: formatted || addressLine1 });
+  // `formatted` already carries city / state / PIN: don't let the stub append them again.
+  return geocodeStub({ postalCode, city, addressLine1, formatted });
 }
 
 /**
@@ -47,7 +48,7 @@ export async function geocodeAddress({ postalCode, city, state, addressLine1 }) 
  * position — so results are flagged `approximate: true` and radius-based serviceability must
  * not rely on them.
  */
-export async function geocodeStub({ postalCode, city, addressLine1 }) {
+export async function geocodeStub({ postalCode, city, addressLine1, formatted = "" }) {
   if (!addressLine1 && !postalCode && !city) {
     return { latitude: null, longitude: null, placeId: "", provider: "stub", approximate: true };
   }
@@ -58,7 +59,7 @@ export async function geocodeStub({ postalCode, city, addressLine1 }) {
     placeId: `stub-${postalCode || city || "na"}`,
     provider: "stub",
     approximate: true,
-    formatted: [addressLine1, city, postalCode].filter(Boolean).join(", "),
+    formatted: formatted || [addressLine1, city, postalCode].filter(Boolean).join(", "),
   };
 }
 

@@ -3,6 +3,10 @@ import { round2, FEE_TAX_RATE } from "../pricing/engine.js";
 import { Tenant } from "../tenants/tenant.model.js";
 
 import { DEFAULT_DELIVERY_PARTNERS, DEFAULT_ETA_DAYS } from "./defaults.js";
+import { PLATFORM_ONLY_COMMERCE_KEYS } from "./registry.js";
+
+export const FEE_BASES = ["per_checkout", "per_seller_order"];
+export const FEE_REFUNDABLE = ["never", "before_shipping", "always"];
 import { repairMojibake } from "../../utils/mojibake.js";
 
 export { DEFAULT_DELIVERY_PARTNERS };
@@ -21,8 +25,12 @@ export function normalizePartners(raw) {
   return cleaned;
 }
 
+/**
+ * Effective value: the store override (only for keys stores may override) else the platform value.
+ * Platform-only keys (fees, delivery partners) ignore any legacy store override.
+ */
 async function readCommerceValue(tenantId, key, fallback) {
-  if (tenantId) {
+  if (tenantId && !PLATFORM_ONLY_COMMERCE_KEYS.includes(key)) {
     const tenantValue = await getSetting("tenant", tenantId, key, undefined);
     if (tenantValue !== undefined && tenantValue !== null) return tenantValue;
   }
@@ -30,7 +38,7 @@ async function readCommerceValue(tenantId, key, fallback) {
 }
 
 export async function getCommerceSettings(tenantId = null) {
-  const [feeEnabled, feeAmount, feePercent, partnerChoice, partners, platformCod, storeCod, freeAbove, returnsOn, returnDays] = await Promise.all([
+  const [feeEnabled, feeAmount, feePercent, partnerChoice, partners, platformCod, storeCod, freeAbove, returnsOn, returnDays, feeBasis, feeRefundable] = await Promise.all([
     readCommerceValue(tenantId, "platform.feeEnabled", false),
     readCommerceValue(tenantId, "platform.feeAmount", 10),
     readCommerceValue(tenantId, "platform.feePercent", 0),
@@ -41,11 +49,17 @@ export async function getCommerceSettings(tenantId = null) {
     tenantId ? getSetting("tenant", tenantId, "delivery.freeAbove", 0) : 0,
     getSetting("platform", null, "returns.enabled", true),
     getSetting("platform", null, "returns.windowDays", 7),
+    getSetting("platform", null, "platform.feeBasis", "per_checkout"),
+    getSetting("platform", null, "platform.feeRefundable", "before_shipping"),
   ]);
   return {
     feeEnabled: Boolean(feeEnabled),
     feeAmount: Math.max(0, Number(feeAmount) || 0),
     feePercent: Math.max(0, Number(feePercent) || 0),
+    /** Platform-only. "per_checkout" (flat fee once per checkout) | "per_seller_order". Consumed by fee calculation (later phase). */
+    feeBasis: FEE_BASES.includes(feeBasis) ? feeBasis : "per_checkout",
+    /** Platform-only. "never" | "before_shipping" | "always": when a cancel/return refunds the platform fee. */
+    feeRefundable: FEE_REFUNDABLE.includes(feeRefundable) ? feeRefundable : "before_shipping",
     deliveryPartnerChoiceEnabled: Boolean(partnerChoice),
     deliveryPartners: normalizePartners(partners),
     /** COD needs both the platform admin and the store to allow it. */
@@ -81,6 +95,8 @@ export function publicCommerce(commerce) {
     platformFeeEnabled: Boolean(commerce.feeEnabled),
     platformFeeAmount: commerce.feeAmount || 0,
     platformFeePercent: commerce.feePercent || 0,
+    platformFeeBasis: commerce.feeBasis || "per_checkout",
+    platformFeeRefundable: commerce.feeRefundable || "before_shipping",
     deliveryPartnerChoiceEnabled: Boolean(commerce.deliveryPartnerChoiceEnabled),
     deliveryPartners: commerce.deliveryPartners,
     codEnabled: Boolean(commerce.codEnabled),

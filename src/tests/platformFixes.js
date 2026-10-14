@@ -441,12 +441,12 @@ await check("catalog: scheduler re-checks products.publish of whoever scheduled"
   await Product.updateOne({ _id: okP.data._id }, { $set: { scheduledBy: adminA._id } });
   await Role.updateOne({ _id: publisherRole._id }, { $pull: { permissions: "products.publish" } });
   const result = await publishScheduledProducts();
-  assert.deepEqual(result, { published: 1, rejected: 1 });
+  assert.deepEqual(result, { published: 1, rejected: 1, deferred: 0 });
   const [a, b] = await Promise.all([Product.findById(okP.data._id).lean(), Product.findById(revokedP.data._id).lean()]);
   assert.equal(a.status, "published");
   assert.equal(b.status, "draft");
   assert.match(b.scheduleError, /products\.publish/);
-  assert.deepEqual(await publishScheduledProducts(), { published: 0, rejected: 0 });
+  assert.deepEqual(await publishScheduledProducts(), { published: 0, rejected: 0, deferred: 0 });
 });
 
 await check("catalog: export honours q / categoryId / brandId / status", async () => {
@@ -534,36 +534,43 @@ await check("settings: /keys metadata", async () => {
   assert.deepEqual([tax.min, tax.max, tax.default], [0, 28, 18]);
   const maps = res.data.definitions.find((d) => d.key === "platform.mapsProvider");
   assert.deepEqual(maps.enum, ["stub", "google"]);
+  // Platform fee settings are platform-only (phase 1); COD stays overridable per store.
   const fee = res.data.definitions.find((d) => d.key === "platform.feeAmount");
-  assert.deepEqual(fee.scopes, ["platform", "tenant"]);
-  assert.equal(fee.overridable, true);
+  assert.deepEqual(fee.scopes, ["platform"]);
+  assert.equal(fee.overridable, false);
+  const cod = res.data.definitions.find((d) => d.key === "payments.codEnabled");
+  assert.deepEqual(cod.scopes, ["platform", "tenant"]);
+  assert.equal(cod.overridable, true);
   const tenantKeys = await call("GET", "/settings/keys", { token: T.adminA });
   assert.equal(tenantKeys.data.scope, "tenant");
   assert.ok(tenantKeys.data.definitions.some((d) => d.key === "store.displayName"));
 });
 
 await check("settings: DELETE tenant override falls back to the platform default", async () => {
-  await call("PUT", "/settings/platform.feeAmount", { token: T.platform, json: { value: 15 } });
-  const put = await call("PUT", "/settings/platform.feeAmount", { token: T.adminA, json: { value: 25 } });
+  await call("PUT", "/settings/payments.codEnabled", { token: T.platform, json: { value: true } });
+  const put = await call("PUT", "/settings/payments.codEnabled", { token: T.adminA, json: { value: false } });
   assert.equal(put.status, 200);
-  assert.equal((await call("GET", "/settings/commerce", { token: T.adminA })).data.feeAmount, 25);
-  assert.equal((await call("DELETE", "/settings/platform.feeAmount", { token: T.agentA })).status, 403);
-  const del = await call("DELETE", "/settings/platform.feeAmount?scope=tenant", { token: T.adminA });
+  assert.equal((await call("GET", "/settings/commerce", { token: T.adminA })).data.storeCodEnabled, false);
+  assert.equal((await call("DELETE", "/settings/payments.codEnabled", { token: T.agentA })).status, 403);
+  const del = await call("DELETE", "/settings/payments.codEnabled?scope=tenant", { token: T.adminA });
   assert.equal(del.status, 200, JSON.stringify(del.data));
   assert.equal(del.data.removed, true);
-  assert.equal(del.data.previous, 25);
-  assert.equal(del.data.effective, 15);
-  assert.equal((await call("GET", "/settings/commerce", { token: T.adminA })).data.feeAmount, 15);
+  assert.equal(del.data.previous, false);
+  assert.equal(del.data.effective, true);
+  assert.equal((await call("GET", "/settings/commerce", { token: T.adminA })).data.storeCodEnabled, true);
+  // Platform fee keys: a store can neither set nor remove them.
+  assert.equal((await call("PUT", "/settings/platform.feeAmount", { token: T.adminA, json: { value: 25 } })).status, 404);
+  assert.equal((await call("DELETE", "/settings/platform.feeAmount?scope=tenant", { token: T.adminA })).status, 404);
 
   await call("PUT", "/settings/payments.codEnabled", { token: T.adminB, json: { value: false } });
-  const byPlatform = await call("DELETE", `/settings/payments.codEnabled?scope=tenant&tenantId=${B._id}`, { token: T.platform });
+  const byPlatform = await call("DELETE", `/settings/payments.codEnabled?scope=tenant&tenantId=${B._id}`, { token: T.platform, headers: { "X-Admin-Reason": "test cleanup" } });
   assert.equal(byPlatform.data.removed, true);
   assert.equal(await Settings.countDocuments({ scope: "tenant", tenantId: B._id, key: "payments.codEnabled" }), 0);
   assert.equal((await call("DELETE", "/settings/payments.codEnabled?scope=tenant", { token: T.platform })).status, 400);
   assert.equal((await call("DELETE", "/settings/platform.name?scope=tenant", { token: T.adminA })).status, 404);
   assert.equal((await call("DELETE", "/settings/platform.feeAmount?scope=platform", { token: T.platform })).status, 400);
   const audited = await waitFor(() => AuditLog.findOne({ action: "delete_override", outcome: "success", tenantId: A._id }).lean());
-  assert.equal(audited.before.value, 25);
+  assert.equal(audited.before.value, false);
 });
 
 await check("settings: public endpoint exposes support email, currency, maps provider, store display name", async () => {
@@ -589,14 +596,14 @@ await check("settings: public endpoint exposes support email, currency, maps pro
 await check("notifications: X-Tenant-Id never leaks into the audience; role announcement reaches every store", async () => {
   const res = await call("POST", "/notifications", {
     token: T.platform,
-    headers: { "X-Tenant-Id": String(A._id) },
+    headers: { "X-Tenant-Id": String(A._id), "X-Admin-Reason": "test announcement" },
     json: { title: "Agents update", audienceType: "role", roleSlug: "support_agent" },
   });
   assert.equal(res.status, 201, JSON.stringify(res.data));
   assert.equal(res.data.tenantId, null);
   const allRes = await call("POST", "/notifications", {
     token: T.platform,
-    headers: { "X-Tenant-Id": String(A._id) },
+    headers: { "X-Tenant-Id": String(A._id), "X-Admin-Reason": "test announcement" },
     json: { title: "Hello everyone", audienceType: "all" },
   });
   assert.equal(allRes.data.tenantId, null);

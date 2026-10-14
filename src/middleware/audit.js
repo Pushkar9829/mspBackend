@@ -23,7 +23,27 @@ const SECRET_KEYS = new Set([
   "apiKey",
   "keySecret",
   "webhookSecret",
+  "accountNumberEnc",
+  "accountHash",
 ]);
+/**
+ * KYC / bank identifiers: kept in audit snapshots only masked (last 4 characters). Objects under
+ * these keys (e.g. `bank`) have every string leaf masked. tenant.statusHistory is the long-term
+ * record of status changes; audit rows are TTL'd.
+ */
+const MASKED_KEYS = new Set(["pan", "bank", "accountNumber", "ifsc"]);
+
+export function maskValue(value) {
+  if (value == null || value === "") return value;
+  if (typeof value === "object" && !(value instanceof Date) && !(value instanceof mongoose.Types.ObjectId)) {
+    if (Array.isArray(value)) return value.map(maskValue);
+    const src = typeof value.toObject === "function" ? value.toObject() : value;
+    return Object.fromEntries(Object.entries(src).filter(([k]) => !SECRET_KEYS.has(k)).map(([k, v]) => [k, maskValue(v)]));
+  }
+  if (typeof value !== "string") return value;
+  const v = value.trim();
+  return v.length <= 4 ? "XXXX" : `XXXX${v.slice(-4)}`;
+}
 const MAX_SNAPSHOT_BYTES = 10 * 1024;
 const MAX_DEPTH = 6;
 
@@ -194,7 +214,9 @@ export async function recordAudit(req, { action, resource, resourceId = null, be
 
 function compact(obj) {
   if (!obj || typeof obj !== "object" || Array.isArray(obj)) return undefined;
-  const entries = Object.entries(obj).filter(([k, v]) => v != null && v !== "" && !SECRET_KEYS.has(k));
+  const entries = Object.entries(obj)
+    .filter(([k, v]) => v != null && v !== "" && !SECRET_KEYS.has(k))
+    .map(([k, v]) => [k, MASKED_KEYS.has(k) ? maskValue(v) : v]);
   return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
@@ -226,7 +248,7 @@ function summarizeRaw(body, depth) {
   const clone = {};
   for (const [key, value] of Object.entries(source)) {
     if (SECRET_KEYS.has(key)) continue;
-    clone[key] = summarizeRaw(value, depth + 1);
+    clone[key] = MASKED_KEYS.has(key) ? maskValue(value) : summarizeRaw(value, depth + 1);
   }
   return clone;
 }

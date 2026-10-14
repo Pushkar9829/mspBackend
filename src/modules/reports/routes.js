@@ -10,6 +10,7 @@ import { Order } from "../orders/order.model.js";
 import { buildOrderFilter, orderSort } from "../orders/service.js";
 import { exportInventory } from "../inventory/service.js";
 import { validate } from "../../middleware/validate.js";
+import { requireFeature } from "../billing/entitlements.js";
 
 const router = Router();
 router.use(authenticate, resolveTenant, requireStaff);
@@ -70,7 +71,9 @@ function platformOnly(req, _res, next) {
 
 const canSeeCustomers = authorizeAny("reports.view", "orders.view", "ledger.view");
 
-router.get("/overview", authorize("reports.view"), validate(rangeQuery), asyncHandler(async (req, res) => {
+// Plan features: reports (overview, sales) and exports (CSV). /customers is customer management
+// (store customer list / detail, offer customer picker), so it is not plan-gated.
+router.get("/overview", authorize("reports.view"), requireFeature("reports"), validate(rangeQuery), asyncHandler(async (req, res) => {
   if (req.isPlatformAdmin && !req.tenantId) {
     res.json(await service.platformOverview());
   } else {
@@ -78,7 +81,7 @@ router.get("/overview", authorize("reports.view"), validate(rangeQuery), asyncHa
   }
 }));
 
-router.get("/sales", authorize("reports.view"), validate(rangeQuery), asyncHandler(async (req, res) => {
+router.get("/sales", authorize("reports.view"), requireFeature("reports"), validate(rangeQuery), asyncHandler(async (req, res) => {
   res.json(await service.salesTrend(req.tenantId, service.resolveRange(req.query, 30)));
 }));
 
@@ -110,6 +113,7 @@ function sendCsv(res, kind, csvText, { total, truncated } = {}) {
 router.get(
   "/export/:kind",
   authorize("reports.export"),
+  requireFeature("exports"),
   validate(exportSchema),
   asyncHandler(async (req, res) => {
     const kind = req.params.kind;

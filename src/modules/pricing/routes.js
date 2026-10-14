@@ -14,7 +14,15 @@ import {
   updateOfferSchema,
   updateCouponSchema,
   idParamSchema,
+  rejectOfferSchema,
 } from "./validators.js";
+import { AppError } from "../../utils/AppError.js";
+
+/** Offers are approved / rejected by the platform only (QA Q1), never by store staff. */
+function platformOnly(req, _res, next) {
+  if (req.isPlatformAdmin) return next();
+  next(new AppError(403, "Offers are approved by the marketplace team", "FORBIDDEN"));
+}
 
 export const pricingRouter = Router();
 pricingRouter.use(authenticate, resolveTenant, requireTenant);
@@ -80,10 +88,21 @@ offerRouter.patch(
 offerRouter.post(
   "/:id/approve",
   authorize("pricing.approve"),
+  platformOnly,
   validate(idParamSchema),
   audit("approve", "offer"),
   asyncHandler(async (req, res) => {
     res.json(await service.approveOffer(req, req.params.id));
+  })
+);
+offerRouter.post(
+  "/:id/reject",
+  authorize("pricing.approve"),
+  platformOnly,
+  validate(rejectOfferSchema),
+  audit("reject", "offer"),
+  asyncHandler(async (req, res) => {
+    res.json(await service.rejectOffer(req, req.params.id, req.body));
   })
 );
 
